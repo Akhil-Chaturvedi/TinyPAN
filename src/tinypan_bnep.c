@@ -1,0 +1,664 @@
+/*
+ * TinyPAN BNEP Layer - Implementation
+ * 
+ * Bluetooth Network Encapsulation Protocol implementation.
+ */
+
+#include "tinypan_bnep.h"
+#include "../include/tinypan_config.h"
+#include "../include/tinypan_hal.h"
+#include <string.h>
+
+/* ============================================================================
+ * Static State
+ * ============================================================================ */
+
+/** Current BNEP state */
+static bnep_state_t s_state = BNEP_STATE_CLOSED;
+
+/** Local Ethernet/Bluetooth address */
+static uint8_t s_local_addr[BNEP_ETHER_ADDR_LEN] = {0};
+
+/** Remote Ethernet/Bluetooth address */
+static uint8_t s_remote_addr[BNEP_ETHER_ADDR_LEN] = {0};
+
+/** Transmit buffer */
+static uint8_t s_tx_buffer[TINYPAN_TX_BUFFER_SIZE];
+
+/** Frame receive callback */
+static bnep_frame_recv_callback_t s_frame_callback = NULL;
+static void* s_frame_callback_user_data = NULL;
+
+/** State change callback */
+static bnep_state_callback_t s_state_callback = NULL;
+static void* s_state_callback_user_data = NULL;
+
+/** Setup response callback */
+static bnep_setup_response_callback_t s_setup_response_callback = NULL;
+static void* s_setup_response_callback_user_data = NULL;
+
+/* ============================================================================
+ * Helper Functions
+ * ============================================================================ */
+
+/**
+ * @brief Write 16-bit value in big-endian (network byte order)
+ */
+static inline void write_be16(uint8_t* buffer, uint16_t value) {
+    buffer[0] = (uint8_t)(value >> 8);
+    buffer[1] = (uint8_t)(value & 0xFF);
+}
+
+/**
+ * @brief Read 16-bit value from big-endian (network byte order)
+ */
+static inline uint16_t read_be16(const uint8_t* buffer) {
+    return ((uint16_t)buffer[0] << 8) | buffer[1];
+}
+
+/**
+ * @brief Set state and notify callback
+ */
+static void set_state(bnep_state_t new_state) {
+    if (s_state != new_state) {
+        TINYPAN_LOG_DEBUG("BNEP state: %d -> %d", s_state, new_state);
+        s_state = new_state;
+        if (s_state_callback) {
+            s_state_callback(new_state, s_state_callback_user_data);
+        }
+    }
+}
+
+/* ============================================================================
+ * Packet Building Functions
+ * ============================================================================ */
+
+int bnep_build_setup_request(uint8_t* buffer, uint16_t buffer_size,
+                              uint16_t src_uuid, uint16_t dst_uuid) {
+    /*
+     * BNEP Setup Connection Request format:
+     * 
+     * Byte 0:      BNEP Type (0x01 = Control, no extension)
+     * Byte 1:      Control Type (0x01 = Setup Connection Request)
+     * Byte 2:      UUID Size (0x02 = 16-bit UUIDs)
+     * Bytes 3-4:   Destination Service UUID (big-endian)
+     * Bytes 5-6:   Source Service UUID (big-endian)
+     * 
+     * Total: 7 bytes
+     */
+    
+    const uint16_t required_size = 7;
+    
+    if (buffer == NULL || buffer_size < required_size) {
+        return -1;
+    }
+    
+    buffer[0] = BNEP_PKT_TYPE_CONTROL;  /* No extension header */
+    buffer[1] = BNEP_CTRL_SETUP_CONNECTION_REQUEST;
+    buffer[2] = 0x02;  /* UUID size = 2 bytes (16-bit UUIDs) */
+    write_be16(&buffer[3], dst_uuid);
+    write_be16(&buffer[5], src_uuid);
+    
+    return (int)required_size;
+}
+
+int bnep_build_setup_response(uint8_t* buffer, uint16_t buffer_size,
+                               uint16_t response_code) {
+    /*
+     * BNEP Setup Connection Response format:
+     * 
+     * Byte 0:      BNEP Type (0x01 = Control, no extension)
+     * Byte 1:      Control Type (0x02 = Setup Connection Response)
+     * Bytes 2-3:   Response Code (big-endian)
+     * 
+     * Total: 4 bytes
+     */
+    
+    const uint16_t required_size = 4;
+    
+    if (buffer == NULL || buffer_size < required_size) {
+        return -1;
+    }
+    
+    buffer[0] = BNEP_PKT_TYPE_CONTROL;
+    buffer[1] = BNEP_CTRL_SETUP_CONNECTION_RESPONSE;
+    write_be16(&buffer[2], response_code);
+    
+    return (int)required_size;
+}
+
+int bnep_build_general_ethernet(uint8_t* buffer, uint16_t buffer_size,
+                                 const uint8_t* dst_addr,
+                                 const uint8_t* src_addr,
+                                 uint16_t ethertype,
+                                 const uint8_t* payload,
+                                 uint16_t payload_len) {
+    /*
+     * BNEP General Ethernet format:
+     * 
+     * Byte 0:          BNEP Type (0x00 = General Ethernet)
+     * Bytes 1-6:       Destination Address
+     * Bytes 7-12:      Source Address
+     * Bytes 13-14:     Networking Protocol Type (EtherType)
+     * Bytes 15+:       Payload
+     * 
+     * Header size: 15 bytes
+     */
+    
+    const uint16_t header_size = 15;
+    const uint16_t required_size = header_size + payload_len;
+    
+    if (buffer == NULL || dst_addr == NULL || src_addr == NULL) {
+        return -1;
+    }
+    
+    if (buffer_size < required_size) {
+        return -1;
+    }
+    
+    buffer[0] = BNEP_PKT_TYPE_GENERAL_ETHERNET;  /* No extension */
+    memcpy(&buffer[1], dst_addr, BNEP_ETHER_ADDR_LEN);
+    memcpy(&buffer[7], src_addr, BNEP_ETHER_ADDR_LEN);
+    write_be16(&buffer[13], ethertype);
+    
+    if (payload != NULL && payload_len > 0) {
+        memcpy(&buffer[15], payload, payload_len);
+    }
+    
+    return (int)required_size;
+}
+
+int bnep_build_compressed_ethernet(uint8_t* buffer, uint16_t buffer_size,
+                                    uint16_t ethertype,
+                                    const uint8_t* payload,
+                                    uint16_t payload_len) {
+    /*
+     * BNEP Compressed Ethernet format (no addresses):
+     * 
+     * Byte 0:          BNEP Type (0x02 = Compressed Ethernet)
+     * Bytes 1-2:       Networking Protocol Type (EtherType)
+     * Bytes 3+:        Payload
+     * 
+     * Header size: 3 bytes
+     */
+    
+    const uint16_t header_size = 3;
+    const uint16_t required_size = header_size + payload_len;
+    
+    if (buffer == NULL || buffer_size < required_size) {
+        return -1;
+    }
+    
+    buffer[0] = BNEP_PKT_TYPE_COMPRESSED_ETHERNET;
+    write_be16(&buffer[1], ethertype);
+    
+    if (payload != NULL && payload_len > 0) {
+        memcpy(&buffer[3], payload, payload_len);
+    }
+    
+    return (int)required_size;
+}
+
+/* ============================================================================
+ * Packet Parsing Functions
+ * ============================================================================ */
+
+int bnep_parse_header(const uint8_t* data, uint16_t len,
+                       uint8_t* pkt_type, bool* has_ext, uint16_t* header_len) {
+    if (data == NULL || len < 1) {
+        return -1;
+    }
+    
+    uint8_t first_byte = data[0];
+    *pkt_type = first_byte & BNEP_TYPE_MASK;
+    *has_ext = (first_byte & BNEP_EXT_HEADER_FLAG) != 0;
+    
+    /* Calculate header length based on packet type */
+    switch (*pkt_type) {
+        case BNEP_PKT_TYPE_GENERAL_ETHERNET:
+            /* Type(1) + DstAddr(6) + SrcAddr(6) + EtherType(2) = 15 */
+            *header_len = 15;
+            break;
+            
+        case BNEP_PKT_TYPE_CONTROL:
+            /* Variable length, minimum: Type(1) + ControlType(1) = 2 */
+            *header_len = 2;
+            break;
+            
+        case BNEP_PKT_TYPE_COMPRESSED_ETHERNET:
+            /* Type(1) + EtherType(2) = 3 */
+            *header_len = 3;
+            break;
+            
+        case BNEP_PKT_TYPE_COMPRESSED_SRC_ONLY:
+            /* Type(1) + SrcAddr(6) + EtherType(2) = 9 */
+            *header_len = 9;
+            break;
+            
+        case BNEP_PKT_TYPE_COMPRESSED_DST_ONLY:
+            /* Type(1) + DstAddr(6) + EtherType(2) = 9 */
+            *header_len = 9;
+            break;
+            
+        default:
+            TINYPAN_LOG_WARN("Unknown BNEP packet type: 0x%02X", *pkt_type);
+            return -1;
+    }
+    
+    if (len < *header_len) {
+        TINYPAN_LOG_WARN("BNEP packet too short: %u < %u", len, *header_len);
+        return -1;
+    }
+    
+    return 0;
+}
+
+int bnep_parse_ethernet_frame(const uint8_t* data, uint16_t len,
+                               const uint8_t* local_addr,
+                               const uint8_t* remote_addr,
+                               bnep_ethernet_frame_t* frame) {
+    if (data == NULL || frame == NULL || len < 3) {
+        return -1;
+    }
+    
+    uint8_t pkt_type;
+    bool has_ext;
+    uint16_t header_len;
+    
+    if (bnep_parse_header(data, len, &pkt_type, &has_ext, &header_len) < 0) {
+        return -1;
+    }
+    
+    /* TODO: Handle extension headers if present */
+    if (has_ext) {
+        TINYPAN_LOG_WARN("Extension headers not supported yet");
+        /* For now, we'll try to parse anyway */
+    }
+    
+    switch (pkt_type) {
+        case BNEP_PKT_TYPE_GENERAL_ETHERNET:
+            /* Full addresses in packet */
+            memcpy(frame->dst_addr, &data[1], BNEP_ETHER_ADDR_LEN);
+            memcpy(frame->src_addr, &data[7], BNEP_ETHER_ADDR_LEN);
+            frame->ethertype = read_be16(&data[13]);
+            frame->payload = &data[15];
+            frame->payload_len = len - 15;
+            break;
+            
+        case BNEP_PKT_TYPE_COMPRESSED_ETHERNET:
+            /* No addresses - use local/remote */
+            if (local_addr == NULL || remote_addr == NULL) {
+                return -1;
+            }
+            /* In compressed mode: dst=local, src=remote (we're receiving) */
+            memcpy(frame->dst_addr, local_addr, BNEP_ETHER_ADDR_LEN);
+            memcpy(frame->src_addr, remote_addr, BNEP_ETHER_ADDR_LEN);
+            frame->ethertype = read_be16(&data[1]);
+            frame->payload = &data[3];
+            frame->payload_len = len - 3;
+            break;
+            
+        case BNEP_PKT_TYPE_COMPRESSED_SRC_ONLY:
+            /* Only source address in packet, dst=local */
+            if (local_addr == NULL) {
+                return -1;
+            }
+            memcpy(frame->dst_addr, local_addr, BNEP_ETHER_ADDR_LEN);
+            memcpy(frame->src_addr, &data[1], BNEP_ETHER_ADDR_LEN);
+            frame->ethertype = read_be16(&data[7]);
+            frame->payload = &data[9];
+            frame->payload_len = len - 9;
+            break;
+            
+        case BNEP_PKT_TYPE_COMPRESSED_DST_ONLY:
+            /* Only destination address in packet, src=remote */
+            if (remote_addr == NULL) {
+                return -1;
+            }
+            memcpy(frame->dst_addr, &data[1], BNEP_ETHER_ADDR_LEN);
+            memcpy(frame->src_addr, remote_addr, BNEP_ETHER_ADDR_LEN);
+            frame->ethertype = read_be16(&data[7]);
+            frame->payload = &data[9];
+            frame->payload_len = len - 9;
+            break;
+            
+        default:
+            return -1;
+    }
+    
+    return 0;
+}
+
+int bnep_parse_setup_response(const uint8_t* data, uint16_t len,
+                               bnep_setup_response_t* response) {
+    /*
+     * Setup Response format (after type byte):
+     * Byte 0:      Control Type (0x02)
+     * Bytes 1-2:   Response Code
+     * 
+     * We expect: Control Type at data[0], Response at data[1-2]
+     */
+    
+    if (data == NULL || response == NULL || len < 3) {
+        return -1;
+    }
+    
+    if (data[0] != BNEP_CTRL_SETUP_CONNECTION_RESPONSE) {
+        TINYPAN_LOG_WARN("Not a setup response: 0x%02X", data[0]);
+        return -1;
+    }
+    
+    response->response_code = read_be16(&data[1]);
+    return 0;
+}
+
+/* ============================================================================
+ * BNEP API Implementation
+ * ============================================================================ */
+
+void bnep_init(void) {
+    s_state = BNEP_STATE_CLOSED;
+    memset(s_local_addr, 0, sizeof(s_local_addr));
+    memset(s_remote_addr, 0, sizeof(s_remote_addr));
+    s_frame_callback = NULL;
+    s_state_callback = NULL;
+    s_setup_response_callback = NULL;
+    TINYPAN_LOG_INFO("BNEP initialized");
+}
+
+void bnep_reset(void) {
+    set_state(BNEP_STATE_CLOSED);
+    TINYPAN_LOG_DEBUG("BNEP reset");
+}
+
+void bnep_set_local_addr(const uint8_t addr[BNEP_ETHER_ADDR_LEN]) {
+    if (addr != NULL) {
+        memcpy(s_local_addr, addr, BNEP_ETHER_ADDR_LEN);
+        TINYPAN_LOG_DEBUG("BNEP local addr: %02X:%02X:%02X:%02X:%02X:%02X",
+                          addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+    }
+}
+
+void bnep_set_remote_addr(const uint8_t addr[BNEP_ETHER_ADDR_LEN]) {
+    if (addr != NULL) {
+        memcpy(s_remote_addr, addr, BNEP_ETHER_ADDR_LEN);
+        TINYPAN_LOG_DEBUG("BNEP remote addr: %02X:%02X:%02X:%02X:%02X:%02X",
+                          addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+    }
+}
+
+void bnep_register_frame_callback(bnep_frame_recv_callback_t callback, void* user_data) {
+    s_frame_callback = callback;
+    s_frame_callback_user_data = user_data;
+}
+
+void bnep_register_state_callback(bnep_state_callback_t callback, void* user_data) {
+    s_state_callback = callback;
+    s_state_callback_user_data = user_data;
+}
+
+void bnep_register_setup_response_callback(bnep_setup_response_callback_t callback, void* user_data) {
+    s_setup_response_callback = callback;
+    s_setup_response_callback_user_data = user_data;
+}
+
+bnep_state_t bnep_get_state(void) {
+    return s_state;
+}
+
+bool bnep_is_connected(void) {
+    return s_state == BNEP_STATE_CONNECTED;
+}
+
+int bnep_send_setup_request(void) {
+    if (s_state != BNEP_STATE_WAIT_FOR_CONNECTION_RESPONSE && 
+        s_state != BNEP_STATE_CLOSED) {
+        TINYPAN_LOG_WARN("Cannot send setup request in state %d", s_state);
+        /* Allow sending anyway for retries */
+    }
+    
+    int pkt_len = bnep_build_setup_request(s_tx_buffer, sizeof(s_tx_buffer),
+                                            BNEP_UUID_PANU, BNEP_UUID_NAP);
+    if (pkt_len < 0) {
+        TINYPAN_LOG_ERROR("Failed to build setup request");
+        return -1;
+    }
+    
+    TINYPAN_LOG_DEBUG("Sending BNEP setup request (PANU -> NAP)");
+    
+    int result = hal_bt_l2cap_send(s_tx_buffer, (uint16_t)pkt_len);
+    if (result < 0) {
+        TINYPAN_LOG_ERROR("Failed to send setup request: %d", result);
+        return result;
+    }
+    
+    return 0;
+}
+
+int bnep_send_setup_response(uint16_t response_code) {
+    int pkt_len = bnep_build_setup_response(s_tx_buffer, sizeof(s_tx_buffer),
+                                             response_code);
+    if (pkt_len < 0) {
+        TINYPAN_LOG_ERROR("Failed to build setup response");
+        return -1;
+    }
+    
+    TINYPAN_LOG_DEBUG("Sending BNEP setup response: 0x%04X", response_code);
+    
+    int result = hal_bt_l2cap_send(s_tx_buffer, (uint16_t)pkt_len);
+    if (result < 0) {
+        TINYPAN_LOG_ERROR("Failed to send setup response: %d", result);
+        return result;
+    }
+    
+    return 0;
+}
+
+int bnep_send_ethernet_frame(const uint8_t* dst_addr,
+                              const uint8_t* src_addr,
+                              uint16_t ethertype,
+                              const uint8_t* payload,
+                              uint16_t payload_len) {
+    if (s_state != BNEP_STATE_CONNECTED) {
+        TINYPAN_LOG_WARN("Cannot send frame: not connected (state=%d)", s_state);
+        return -1;
+    }
+    
+    if (!hal_bt_l2cap_can_send()) {
+        TINYPAN_LOG_DEBUG("Cannot send now, L2CAP busy");
+        return 1;  /* Busy, try again */
+    }
+    
+    int pkt_len;
+    
+#if TINYPAN_ENABLE_COMPRESSION
+    /* Check if we can use compression */
+    bool can_compress_dst = (memcmp(dst_addr, s_remote_addr, BNEP_ETHER_ADDR_LEN) == 0);
+    bool can_compress_src = (memcmp(src_addr, s_local_addr, BNEP_ETHER_ADDR_LEN) == 0);
+    
+    if (can_compress_dst && can_compress_src) {
+        /* Fully compressed */
+        pkt_len = bnep_build_compressed_ethernet(s_tx_buffer, sizeof(s_tx_buffer),
+                                                   ethertype, payload, payload_len);
+    } else {
+        /* General Ethernet (no compression) */
+        pkt_len = bnep_build_general_ethernet(s_tx_buffer, sizeof(s_tx_buffer),
+                                               dst_addr, src_addr, ethertype,
+                                               payload, payload_len);
+    }
+#else
+    /* Always use general Ethernet */
+    pkt_len = bnep_build_general_ethernet(s_tx_buffer, sizeof(s_tx_buffer),
+                                           dst_addr, src_addr, ethertype,
+                                           payload, payload_len);
+#endif
+    
+    if (pkt_len < 0) {
+        TINYPAN_LOG_ERROR("Failed to build Ethernet frame");
+        return -1;
+    }
+    
+    int result = hal_bt_l2cap_send(s_tx_buffer, (uint16_t)pkt_len);
+    if (result > 0) {
+        /* Busy */
+        hal_bt_l2cap_request_can_send_now();
+        return 1;
+    }
+    if (result < 0) {
+        TINYPAN_LOG_ERROR("Failed to send Ethernet frame: %d", result);
+        return result;
+    }
+    
+    return 0;
+}
+
+/* ============================================================================
+ * Incoming Packet Handling
+ * ============================================================================ */
+
+/**
+ * @brief Handle incoming control packet
+ */
+static void handle_control_packet(const uint8_t* data, uint16_t len) {
+    if (len < 2) {
+        TINYPAN_LOG_WARN("Control packet too short");
+        return;
+    }
+    
+    uint8_t control_type = data[1];
+    
+    switch (control_type) {
+        case BNEP_CTRL_SETUP_CONNECTION_REQUEST:
+            TINYPAN_LOG_DEBUG("Received setup connection request");
+            /* We're acting as PANU (client), not server. 
+               If we receive a request, send "not allowed" */
+            bnep_send_setup_response(BNEP_SETUP_RESPONSE_NOT_ALLOWED);
+            break;
+            
+        case BNEP_CTRL_SETUP_CONNECTION_RESPONSE:
+            TINYPAN_LOG_DEBUG("Received setup connection response");
+            if (s_state == BNEP_STATE_WAIT_FOR_CONNECTION_RESPONSE) {
+                bnep_setup_response_t response;
+                /* Parse from byte 1 onwards (control type + response code) */
+                if (bnep_parse_setup_response(&data[1], len - 1, &response) == 0) {
+                    TINYPAN_LOG_INFO("BNEP setup response: 0x%04X", response.response_code);
+                    
+                    if (response.response_code == BNEP_SETUP_RESPONSE_SUCCESS) {
+                        set_state(BNEP_STATE_CONNECTED);
+                    }
+                    
+                    if (s_setup_response_callback) {
+                        s_setup_response_callback(response.response_code,
+                                                   s_setup_response_callback_user_data);
+                    }
+                } else {
+                    TINYPAN_LOG_ERROR("Failed to parse setup response");
+                }
+            } else {
+                TINYPAN_LOG_WARN("Unexpected setup response in state %d", s_state);
+            }
+            break;
+            
+        case BNEP_CTRL_FILTER_NET_TYPE_SET:
+        case BNEP_CTRL_FILTER_MULTI_ADDR_SET:
+            /* NAP is setting filters - respond with success */
+            TINYPAN_LOG_DEBUG("Received filter set request, acknowledging");
+            /* TODO: Actually process filters */
+            {
+                uint8_t resp_type = (control_type == BNEP_CTRL_FILTER_NET_TYPE_SET) ?
+                                    BNEP_CTRL_FILTER_NET_TYPE_RESPONSE :
+                                    BNEP_CTRL_FILTER_MULTI_ADDR_RESPONSE;
+                uint8_t resp[4] = {
+                    BNEP_PKT_TYPE_CONTROL,
+                    resp_type,
+                    0x00, 0x00  /* Success */
+                };
+                hal_bt_l2cap_send(resp, sizeof(resp));
+            }
+            break;
+            
+        case BNEP_CTRL_COMMAND_NOT_UNDERSTOOD:
+            TINYPAN_LOG_WARN("Remote didn't understand our command");
+            break;
+            
+        default:
+            TINYPAN_LOG_WARN("Unknown control type: 0x%02X", control_type);
+            /* Send "not understood" response */
+            {
+                uint8_t resp[3] = {
+                    BNEP_PKT_TYPE_CONTROL,
+                    BNEP_CTRL_COMMAND_NOT_UNDERSTOOD,
+                    control_type
+                };
+                hal_bt_l2cap_send(resp, sizeof(resp));
+            }
+            break;
+    }
+}
+
+/**
+ * @brief Handle incoming Ethernet frame
+ */
+static void handle_ethernet_frame(const uint8_t* data, uint16_t len) {
+    if (s_state != BNEP_STATE_CONNECTED) {
+        TINYPAN_LOG_WARN("Received frame but not connected");
+        return;
+    }
+    
+    bnep_ethernet_frame_t frame;
+    
+    if (bnep_parse_ethernet_frame(data, len, s_local_addr, s_remote_addr, &frame) < 0) {
+        TINYPAN_LOG_WARN("Failed to parse Ethernet frame");
+        return;
+    }
+    
+    TINYPAN_LOG_DEBUG("Received frame: ethertype=0x%04X len=%u", 
+                       frame.ethertype, frame.payload_len);
+    
+    if (s_frame_callback) {
+        s_frame_callback(&frame, s_frame_callback_user_data);
+    }
+}
+
+void bnep_handle_incoming(const uint8_t* data, uint16_t len) {
+    if (data == NULL || len == 0) {
+        return;
+    }
+    
+    uint8_t pkt_type;
+    bool has_ext;
+    uint16_t header_len;
+    
+    if (bnep_parse_header(data, len, &pkt_type, &has_ext, &header_len) < 0) {
+        TINYPAN_LOG_WARN("Failed to parse BNEP header");
+        return;
+    }
+    
+    switch (pkt_type) {
+        case BNEP_PKT_TYPE_CONTROL:
+            handle_control_packet(data, len);
+            break;
+            
+        case BNEP_PKT_TYPE_GENERAL_ETHERNET:
+        case BNEP_PKT_TYPE_COMPRESSED_ETHERNET:
+        case BNEP_PKT_TYPE_COMPRESSED_SRC_ONLY:
+        case BNEP_PKT_TYPE_COMPRESSED_DST_ONLY:
+            handle_ethernet_frame(data, len);
+            break;
+            
+        default:
+            TINYPAN_LOG_WARN("Unknown BNEP packet type: 0x%02X", pkt_type);
+            break;
+    }
+}
+
+void bnep_on_l2cap_connected(void) {
+    TINYPAN_LOG_INFO("L2CAP connected, sending BNEP setup request");
+    set_state(BNEP_STATE_WAIT_FOR_CONNECTION_RESPONSE);
+    bnep_send_setup_request();
+}
+
+void bnep_on_l2cap_disconnected(void) {
+    TINYPAN_LOG_INFO("L2CAP disconnected");
+    set_state(BNEP_STATE_CLOSED);
+}
