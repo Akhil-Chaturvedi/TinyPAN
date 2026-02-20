@@ -73,8 +73,19 @@ ctest --test-dir build -V
 
 At the time of writing, CTest runs:
 - `BNEPTests` (`tests/test_bnep.c`)
-- `SupervisorTests` (`tests/test_supervisor.c`)
+- `SupervisorTests` (`tests/test_supervisor.c`, includes reconnect/timeout edge coverage)
 - `IntegrationFlowTests` (`tests/test_integration.c` + `tests/dhcp_sim.c`)
+- `SizeBudgetCheck` (`scripts/check_size_budget.sh`, checks aggregate `.text`/`.bss` budget for core TinyPAN objects)
+
+Default size-budget thresholds can be overridden via environment variables when running the check:
+- `TINYPAN_TEXT_BUDGET`
+- `TINYPAN_BSS_BUDGET`
+
+## Roadmap
+
+A simulation-first, PR-sized execution roadmap is maintained in:
+
+- `docs/ROADMAP.md`
 
 ## Linux HAL prototype
 

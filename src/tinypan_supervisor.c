@@ -80,10 +80,9 @@ static void schedule_reconnect(void) {
         }
     }
     
-    s_reconnect_attempts++;
-    
-    TINYPAN_LOG_INFO("Reconnect scheduled in %lu ms (attempt %u)",
-                      (unsigned long)s_reconnect_delay_ms, s_reconnect_attempts);
+    TINYPAN_LOG_INFO("Reconnect scheduled in %lu ms (next attempt %u)",
+                      (unsigned long)s_reconnect_delay_ms,
+                      (unsigned int)(s_reconnect_attempts + 1));
     
     s_last_action_time = hal_get_tick_ms();
 }
@@ -240,10 +239,12 @@ void supervisor_process(void) {
                         set_state(TINYPAN_STATE_ERROR);
                     } else {
                         /* Try to reconnect */
-                        TINYPAN_LOG_INFO("Reconnecting...");
+                        s_reconnect_attempts++;
+                        TINYPAN_LOG_INFO("Reconnecting (attempt %u)...",
+                                         (unsigned int)s_reconnect_attempts);
                         set_state(TINYPAN_STATE_CONNECTING);
                         s_setup_retries = 0;
-                        
+
                         int result = start_l2cap_connect();
                         if (result < 0) {
                             TINYPAN_LOG_ERROR("Reconnect failed: %d", result);
