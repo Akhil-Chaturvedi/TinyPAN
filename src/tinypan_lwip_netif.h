@@ -103,6 +103,13 @@ uint32_t tinypan_netif_get_gateway(void);
  */
 uint32_t tinypan_netif_get_netmask(void);
 
+/**
+ * @brief Process lwIP timeout/timer callbacks
+ *
+ * Must be called periodically while the interface is active.
+ */
+void tinypan_netif_process(void);
+
 #ifdef __cplusplus
 }
 #endif
