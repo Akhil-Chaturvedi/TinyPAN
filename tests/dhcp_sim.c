@@ -200,7 +200,6 @@ int dhcp_sim_build_bnep_packet(uint8_t* buffer, uint16_t buffer_size,
     buffer[pos++] = 0x00;
     
     /* IP Header */
-    uint16_t ip_start = pos;
     buffer[pos++] = 0x45;  /* Version 4, IHL 5 */
     buffer[pos++] = 0x00;  /* DSCP/ECN */
     uint16_t ip_total_len = ip_header + udp_header + dhcp_len;

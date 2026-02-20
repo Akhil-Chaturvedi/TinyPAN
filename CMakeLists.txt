@@ -62,6 +62,8 @@ endif()
 # Tests
 if(TINYPAN_BUILD_TESTS)
     enable_testing()
+
+    find_program(CMAKE_SIZE_TOOL NAMES size llvm-size)
     
     # BNEP Unit Tests
     add_executable(test_bnep tests/test_bnep.c src/tinypan_bnep.c)
@@ -101,6 +103,18 @@ if(TINYPAN_BUILD_TESTS)
     target_link_libraries(test_integration tinypan)
 
     add_test(NAME IntegrationFlowTests COMMAND test_integration)
+
+    if(CMAKE_SIZE_TOOL)
+        add_test(
+            NAME SizeBudgetCheck
+            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_size_budget.sh ${CMAKE_CURRENT_BINARY_DIR}
+        )
+        set_tests_properties(SizeBudgetCheck PROPERTIES
+            ENVIRONMENT "SIZE_TOOL=${CMAKE_SIZE_TOOL}"
+        )
+    else()
+        message(WARNING "No size tool found; SizeBudgetCheck test will be skipped")
+    endif()
 endif()
 
 # Print configuration summary

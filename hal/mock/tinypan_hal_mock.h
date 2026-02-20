@@ -14,6 +14,22 @@
 extern "C" {
 #endif
 
+
+/**
+ * @brief Enable/disable deterministic mock time source for tests
+ */
+void mock_hal_use_mock_time(bool enabled);
+
+/**
+ * @brief Set current mock tick (milliseconds)
+ */
+void mock_hal_set_tick_ms(uint32_t tick_ms);
+
+/**
+ * @brief Advance current mock tick by delta milliseconds
+ */
+void mock_hal_advance_tick_ms(uint32_t delta_ms);
+
 /**
  * @brief Simulate L2CAP connection success
  */

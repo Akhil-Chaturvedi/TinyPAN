@@ -32,15 +32,24 @@ static void* s_recv_callback_user_data = NULL;
 static hal_l2cap_event_callback_t s_event_callback = NULL;
 static void* s_event_callback_user_data = NULL;
 
-/* Simulated receive buffer for testing */
-#define MOCK_RX_BUFFER_SIZE 2048
-static uint8_t s_mock_rx_buffer[MOCK_RX_BUFFER_SIZE];
-static uint16_t s_mock_rx_len = 0;
-static bool s_mock_rx_pending = false;
+static bool s_use_mock_time = false;
+static uint32_t s_mock_tick_ms = 0;
 
 /* ============================================================================
  * Mock Control API (for testing)
  * ============================================================================ */
+
+void mock_hal_use_mock_time(bool enabled) {
+    s_use_mock_time = enabled;
+}
+
+void mock_hal_set_tick_ms(uint32_t tick_ms) {
+    s_mock_tick_ms = tick_ms;
+}
+
+void mock_hal_advance_tick_ms(uint32_t delta_ms) {
+    s_mock_tick_ms += delta_ms;
+}
 
 /**
  * @brief Simulate L2CAP connection success
@@ -139,6 +148,7 @@ int hal_bt_init(void) {
     s_initialized = true;
     s_connected = false;
     s_can_send = true;
+    s_mock_tick_ms = 0;
     return 0;
 }
 
@@ -228,6 +238,9 @@ void hal_get_local_bd_addr(uint8_t addr[HAL_BD_ADDR_LEN]) {
 }
 
 uint32_t hal_get_tick_ms(void) {
+    if (s_use_mock_time) {
+        return s_mock_tick_ms;
+    }
 #ifdef _WIN32
     return (uint32_t)GetTickCount();
 #else
