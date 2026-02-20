@@ -10,6 +10,10 @@
 #include "tinypan_supervisor.h"
 #include <string.h>
 
+#if TINYPAN_ENABLE_LWIP
+#include "tinypan_lwip_netif.h"
+#endif
+
 /* ============================================================================
  * State
  * ============================================================================ */
@@ -18,6 +22,7 @@ static bool s_initialized = false;
 static tinypan_config_t s_config;
 static tinypan_event_callback_t s_event_callback = NULL;
 static void* s_event_callback_user_data = NULL;
+static tinypan_state_t s_last_reported_state = TINYPAN_STATE_IDLE;
 
 /* IP info (will be filled by lwIP integration) */
 static tinypan_ip_info_t s_ip_info = {0};
@@ -60,7 +65,29 @@ static void bnep_frame_callback(const bnep_ethernet_frame_t* frame, void* user_d
     TINYPAN_LOG_DEBUG("Received frame: type=0x%04X len=%u",
                        frame->ethertype, frame->payload_len);
     
+#if TINYPAN_ENABLE_LWIP
+    if (frame == NULL) {
+        return;
+    }
+
+    /* lwIP expects a complete Ethernet frame (dst + src + ethertype + payload). */
+    uint16_t ethernet_len = (uint16_t)(14 + frame->payload_len);
+    if (ethernet_len > TINYPAN_TX_BUFFER_SIZE) {
+        TINYPAN_LOG_WARN("Drop frame: too large for lwIP bridge (%u bytes)", ethernet_len);
+        return;
+    }
+
+    uint8_t ethernet_frame[TINYPAN_TX_BUFFER_SIZE];
+    memcpy(&ethernet_frame[0], frame->dst_addr, 6);
+    memcpy(&ethernet_frame[6], frame->src_addr, 6);
+    ethernet_frame[12] = (uint8_t)((frame->ethertype >> 8) & 0xFF);
+    ethernet_frame[13] = (uint8_t)(frame->ethertype & 0xFF);
+    memcpy(&ethernet_frame[14], frame->payload, frame->payload_len);
+
+    tinypan_netif_input(ethernet_frame, ethernet_len);
+#else
     /* TODO: Pass to lwIP netif */
+#endif
 }
 
 /* ============================================================================
@@ -127,6 +154,15 @@ tinypan_error_t tinypan_init(const tinypan_config_t* config) {
     
     /* Initialize supervisor */
     supervisor_init(config);
+    s_last_reported_state = supervisor_get_state();
+
+#if TINYPAN_ENABLE_LWIP
+    if (tinypan_netif_init() < 0) {
+        TINYPAN_LOG_ERROR("lwIP netif init failed");
+        hal_bt_deinit();
+        return TINYPAN_ERR_HAL_FAILED;
+    }
+#endif
     
     s_initialized = true;
     s_has_ip = false;
@@ -165,11 +201,26 @@ void tinypan_stop(void) {
     
     TINYPAN_LOG_INFO("TinyPAN stopping");
     
+    tinypan_state_t previous_state = supervisor_get_state();
     supervisor_stop();
+
+#if TINYPAN_ENABLE_LWIP
+    tinypan_netif_stop_dhcp();
+    tinypan_netif_set_link(false);
+#endif
+
     s_has_ip = false;
     memset(&s_ip_info, 0, sizeof(s_ip_info));
-    
-    dispatch_event(TINYPAN_EVENT_DISCONNECTED);
+
+    tinypan_state_t current_state = supervisor_get_state();
+    if (current_state != s_last_reported_state) {
+        s_last_reported_state = current_state;
+        dispatch_event(TINYPAN_EVENT_STATE_CHANGED);
+    }
+
+    if (previous_state != TINYPAN_STATE_IDLE) {
+        dispatch_event(TINYPAN_EVENT_DISCONNECTED);
+    }
 }
 
 void tinypan_process(void) {
@@ -179,6 +230,16 @@ void tinypan_process(void) {
     
     /* Process supervisor state machine */
     supervisor_process();
+
+    tinypan_state_t current_state = supervisor_get_state();
+    if (current_state != s_last_reported_state) {
+        s_last_reported_state = current_state;
+        dispatch_event(TINYPAN_EVENT_STATE_CHANGED);
+    }
+
+#if TINYPAN_ENABLE_LWIP
+    tinypan_netif_process();
+#endif
 }
 
 tinypan_state_t tinypan_get_state(void) {
@@ -225,11 +286,17 @@ void tinypan_deinit(void) {
     TINYPAN_LOG_INFO("TinyPAN de-initializing");
     
     tinypan_stop();
+
+#if TINYPAN_ENABLE_LWIP
+    tinypan_netif_deinit();
+#endif
+
     hal_bt_deinit();
     
     s_initialized = false;
     s_event_callback = NULL;
     s_event_callback_user_data = NULL;
+    s_last_reported_state = TINYPAN_STATE_IDLE;
     
     TINYPAN_LOG_INFO("TinyPAN de-initialized");
 }
@@ -246,6 +313,13 @@ void tinypan_internal_set_ip(uint32_t ip, uint32_t netmask, uint32_t gw, uint32_
     s_has_ip = true;
     
     supervisor_on_ip_acquired();
+
+    tinypan_state_t current_state = supervisor_get_state();
+    if (current_state != s_last_reported_state) {
+        s_last_reported_state = current_state;
+        dispatch_event(TINYPAN_EVENT_STATE_CHANGED);
+    }
+
     dispatch_event(TINYPAN_EVENT_IP_ACQUIRED);
 }
 
@@ -254,5 +328,12 @@ void tinypan_internal_clear_ip(void) {
     memset(&s_ip_info, 0, sizeof(s_ip_info));
     
     supervisor_on_ip_lost();
+
+    tinypan_state_t current_state = supervisor_get_state();
+    if (current_state != s_last_reported_state) {
+        s_last_reported_state = current_state;
+        dispatch_event(TINYPAN_EVENT_STATE_CHANGED);
+    }
+
     dispatch_event(TINYPAN_EVENT_IP_LOST);
 }

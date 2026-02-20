@@ -14,6 +14,9 @@
 #include "../src/tinypan_bnep.h"
 #include "../src/tinypan_supervisor.h"
 
+extern void tinypan_internal_set_ip(uint32_t ip, uint32_t netmask, uint32_t gw, uint32_t dns);
+extern void tinypan_internal_clear_ip(void);
+
 /* ============================================================================
  * Test Helpers
  * ============================================================================ */
@@ -23,6 +26,8 @@ static int tests_passed = 0;
 
 static tinypan_state_t last_state = TINYPAN_STATE_IDLE;
 static int event_count = 0;
+static int state_change_event_count = 0;
+static int disconnect_event_count = 0;
 
 #define TEST(name) \
     do { \
@@ -40,13 +45,18 @@ static int event_count = 0;
 static void reset_test_state(void) {
     last_state = TINYPAN_STATE_IDLE;
     event_count = 0;
+    state_change_event_count = 0;
+    disconnect_event_count = 0;
 }
 
 static void event_callback(tinypan_event_t event, void* user_data) {
     (void)user_data;
     event_count++;
     if (event == TINYPAN_EVENT_STATE_CHANGED) {
+        state_change_event_count++;
         last_state = tinypan_get_state();
+    } else if (event == TINYPAN_EVENT_DISCONNECTED) {
+        disconnect_event_count++;
     }
 }
 
@@ -354,6 +364,79 @@ static int test_full_connection_flow(void) {
     return 1;
 }
 
+/**
+ * Test: State change callbacks are emitted across runtime transitions
+ */
+static int test_state_change_event_sequence(void) {
+    tinypan_config_t config = get_test_config();
+    tinypan_init(&config);
+    tinypan_set_event_callback(event_callback, NULL);
+
+    tinypan_start();
+    mock_hal_simulate_connect_success();
+    tinypan_process();
+    mock_hal_simulate_bnep_setup_success();
+    tinypan_process();
+    tinypan_internal_set_ip(0x0202A8C0u, 0x00FFFFFFu, 0x0102A8C0u, 0x08080808u);
+    tinypan_stop();
+
+    /* Expected state changes: CONNECTING, BNEP_SETUP, DHCP, ONLINE, IDLE */
+    if (state_change_event_count < 5) {
+        printf("\n    Expected >=5 state change events, got %d\n", state_change_event_count);
+        tinypan_deinit();
+        return 0;
+    }
+
+    if (disconnect_event_count != 1) {
+        printf("\n    Expected exactly 1 disconnect event, got %d\n", disconnect_event_count);
+        tinypan_deinit();
+        return 0;
+    }
+
+    tinypan_deinit();
+    return 1;
+}
+
+/**
+ * Test: IP loss transitions ONLINE back to DHCP and emits IP_LOST path events
+ */
+static int test_ip_loss_transitions_to_dhcp(void) {
+    tinypan_config_t config = get_test_config();
+    tinypan_init(&config);
+    tinypan_set_event_callback(event_callback, NULL);
+
+    tinypan_start();
+    mock_hal_simulate_connect_success();
+    tinypan_process();
+    mock_hal_simulate_bnep_setup_success();
+    tinypan_process();
+    tinypan_internal_set_ip(0x0202A8C0u, 0x00FFFFFFu, 0x0102A8C0u, 0x08080808u);
+
+    if (tinypan_get_state() != TINYPAN_STATE_ONLINE) {
+        printf("\n    Expected ONLINE before IP loss\n");
+        tinypan_deinit();
+        return 0;
+    }
+
+    int state_changes_before = state_change_event_count;
+    tinypan_internal_clear_ip();
+
+    if (tinypan_get_state() != TINYPAN_STATE_DHCP) {
+        printf("\n    Expected DHCP after IP loss, got %s\n", tinypan_state_to_string(tinypan_get_state()));
+        tinypan_deinit();
+        return 0;
+    }
+
+    if (state_change_event_count <= state_changes_before) {
+        printf("\n    Expected additional STATE_CHANGED event on IP loss\n");
+        tinypan_deinit();
+        return 0;
+    }
+
+    tinypan_deinit();
+    return 1;
+}
+
 /* ============================================================================
  * Main
  * ============================================================================ */
@@ -375,6 +458,8 @@ int main(void) {
     TEST(state_to_string);
     TEST(config_defaults);
     TEST(full_connection_flow);
+    TEST(state_change_event_sequence);
+    TEST(ip_loss_transitions_to_dhcp);
     
     printf("\n========================\n");
     printf("Results: %d/%d tests passed\n", tests_passed, tests_run);

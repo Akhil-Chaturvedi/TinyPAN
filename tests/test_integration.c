@@ -14,103 +14,14 @@
 #include "../src/tinypan_bnep.h"
 #include "dhcp_sim.h"
 
-/* ============================================================================
- * State
- * ============================================================================ */
-
 static dhcp_sim_config_t g_dhcp_config;
-static int g_dhcp_state = 0;  /* 0=idle, 1=discover_sent, 2=offer_sent, 3=request_sent, 4=ack_sent */
-static uint32_t g_dhcp_xid = 0;
-static uint8_t g_client_mac[6] = {0};
 
-/* Capture TX packets for inspection */
-static uint8_t g_last_tx[2048];
-static uint16_t g_last_tx_len = 0;
+static tinypan_state_t g_state_history[16];
+static int g_state_history_count = 0;
+static int g_disconnect_count = 0;
 
-/* ============================================================================
- * Custom Mock HAL with DHCP Auto-Response
- * ============================================================================ */
-
-/**
- * Custom receive callback that intercepts TX and auto-responds with DHCP
- */
-static void dhcp_auto_respond(const uint8_t* data, uint16_t len) {
-    /* Save TX packet for inspection */
-    if (len <= sizeof(g_last_tx)) {
-        memcpy(g_last_tx, data, len);
-        g_last_tx_len = len;
-    }
-    
-    /* Check if it's a DHCP Discover */
-    uint32_t xid;
-    uint8_t client_mac[6];
-    
-    if (dhcp_sim_is_discover(data, len, &xid, client_mac)) {
-        printf("    [SIM] Received DHCP Discover (xid=0x%08X)\n", xid);
-        g_dhcp_xid = xid;
-        memcpy(g_client_mac, client_mac, 6);
-        g_dhcp_state = 1;
-        
-        /* Build and send DHCP Offer */
-        uint8_t dhcp_payload[512];
-        int dhcp_len = dhcp_sim_build_offer(dhcp_payload, sizeof(dhcp_payload),
-                                             &g_dhcp_config, xid, client_mac);
-        
-        if (dhcp_len > 0) {
-            uint8_t bnep_packet[1024];
-            uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-            
-            int pkt_len = dhcp_sim_build_bnep_packet(
-                bnep_packet, sizeof(bnep_packet),
-                g_dhcp_config.server_mac,
-                broadcast_mac,
-                g_dhcp_config.server_ip,
-                0xFFFFFFFF,  /* Broadcast */
-                dhcp_payload,
-                (uint16_t)dhcp_len
-            );
-            
-            if (pkt_len > 0) {
-                printf("    [SIM] Sending DHCP Offer (IP: 192.168.44.2)\n");
-                mock_hal_simulate_receive(bnep_packet, (uint16_t)pkt_len);
-                g_dhcp_state = 2;
-            }
-        }
-        return;
-    }
-    
-    if (dhcp_sim_is_request(data, len, &xid)) {
-        printf("    [SIM] Received DHCP Request (xid=0x%08X)\n", xid);
-        g_dhcp_state = 3;
-        
-        /* Build and send DHCP ACK */
-        uint8_t dhcp_payload[512];
-        int dhcp_len = dhcp_sim_build_ack(dhcp_payload, sizeof(dhcp_payload),
-                                           &g_dhcp_config, xid, g_client_mac);
-        
-        if (dhcp_len > 0) {
-            uint8_t bnep_packet[1024];
-            uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-            
-            int pkt_len = dhcp_sim_build_bnep_packet(
-                bnep_packet, sizeof(bnep_packet),
-                g_dhcp_config.server_mac,
-                broadcast_mac,
-                g_dhcp_config.server_ip,
-                g_dhcp_config.client_ip,
-                dhcp_payload,
-                (uint16_t)dhcp_len
-            );
-            
-            if (pkt_len > 0) {
-                printf("    [SIM] Sending DHCP ACK\n");
-                mock_hal_simulate_receive(bnep_packet, (uint16_t)pkt_len);
-                g_dhcp_state = 4;
-            }
-        }
-        return;
-    }
-}
+/* Internal hook used by lwIP integration path when DHCP succeeds. */
+extern void tinypan_internal_set_ip(uint32_t ip, uint32_t netmask, uint32_t gw, uint32_t dns);
 
 /* ============================================================================
  * Event Callback
@@ -121,6 +32,9 @@ static void event_callback(tinypan_event_t event, void* user_data) {
     
     switch (event) {
         case TINYPAN_EVENT_STATE_CHANGED:
+            if (g_state_history_count < (int)(sizeof(g_state_history) / sizeof(g_state_history[0]))) {
+                g_state_history[g_state_history_count++] = tinypan_get_state();
+            }
             printf("    State: %s\n", tinypan_state_to_string(tinypan_get_state()));
             break;
         case TINYPAN_EVENT_CONNECTED:
@@ -130,6 +44,7 @@ static void event_callback(tinypan_event_t event, void* user_data) {
             printf("    *** IP ACQUIRED! ***\n");
             break;
         case TINYPAN_EVENT_DISCONNECTED:
+            g_disconnect_count++;
             printf("    Disconnected\n");
             break;
         default:
@@ -148,6 +63,8 @@ int main(void) {
     
     /* Setup DHCP simulation config */
     dhcp_sim_get_default_config(&g_dhcp_config);
+    g_state_history_count = 0;
+    g_disconnect_count = 0;
     
     printf("Simulated Network Configuration:\n");
     printf("  Server (NAP):  192.168.44.1\n");
@@ -173,24 +90,39 @@ int main(void) {
     /* Start connection */
     printf("[Step 2] Start Connection\n");
     tinypan_start();
+    if (tinypan_get_state() != TINYPAN_STATE_CONNECTING) {
+        printf("    FAILED: Expected CONNECTING\n");
+        tinypan_deinit();
+        return 1;
+    }
     printf("\n");
     
     /* Simulate L2CAP connect */
     printf("[Step 3] Phone Accepts L2CAP Connection\n");
     mock_hal_simulate_connect_success();
     tinypan_process();
+    if (tinypan_get_state() != TINYPAN_STATE_BNEP_SETUP) {
+        printf("    FAILED: Expected BNEP_SETUP\n");
+        tinypan_deinit();
+        return 1;
+    }
     printf("\n");
     
     /* Simulate BNEP setup */
     printf("[Step 4] Phone Accepts BNEP Setup\n");
     mock_hal_simulate_bnep_setup_success();
     tinypan_process();
+    if (tinypan_get_state() != TINYPAN_STATE_DHCP) {
+        printf("    FAILED: Expected DHCP\n");
+        tinypan_deinit();
+        return 1;
+    }
     printf("\n");
     
     /* Now in DHCP state - in a real scenario, lwIP would send DHCP Discover */
     printf("[Step 5] DHCP Exchange (Simulated)\n");
-    printf("    Note: Full DHCP requires lwIP integration.\n");
-    printf("    Here we demonstrate the packet format:\n\n");
+    printf("    Note: Full DHCP client runtime still depends on lwIP backend wiring.\n");
+    printf("    Here we demonstrate packet format and final IP-acquired event path.\n\n");
     
     /* Manually show what packets would look like */
     printf("    DHCP DISCOVER would contain:\n");
@@ -234,6 +166,55 @@ int main(void) {
         if ((i + 1) % 16 == 0) printf("\n      ");
     }
     printf("\n\n");
+
+    printf("[Step 5b] Simulate DHCP ACK applied to TinyPAN\n");
+    tinypan_internal_set_ip(g_dhcp_config.client_ip,
+                            g_dhcp_config.netmask,
+                            g_dhcp_config.gateway_ip,
+                            g_dhcp_config.dns_ip);
+
+    if (tinypan_get_state() != TINYPAN_STATE_ONLINE) {
+        printf("    FAILED: Expected ONLINE after IP acquisition\n");
+        tinypan_deinit();
+        return 1;
+    }
+
+    if (!tinypan_is_online()) {
+        printf("    FAILED: tinypan_is_online() should be true\n");
+        tinypan_deinit();
+        return 1;
+    }
+
+    tinypan_ip_info_t info;
+    if (tinypan_get_ip_info(&info) != TINYPAN_OK || info.ip_addr != g_dhcp_config.client_ip) {
+        printf("    FAILED: Expected valid IP info after acquisition\n");
+        tinypan_deinit();
+        return 1;
+    }
+    printf("    OK: ONLINE with IP info populated\n\n");
+
+    /* Validate state callback sequence */
+    const tinypan_state_t expected_states[] = {
+        TINYPAN_STATE_CONNECTING,
+        TINYPAN_STATE_BNEP_SETUP,
+        TINYPAN_STATE_DHCP,
+        TINYPAN_STATE_ONLINE
+    };
+    if (g_state_history_count < (int)(sizeof(expected_states) / sizeof(expected_states[0]))) {
+        printf("    FAILED: State event history too short (%d)\n", g_state_history_count);
+        tinypan_deinit();
+        return 1;
+    }
+    for (int i = 0; i < (int)(sizeof(expected_states) / sizeof(expected_states[0])); i++) {
+        if (g_state_history[i] != expected_states[i]) {
+            printf("    FAILED: State event %d mismatch (expected %s, got %s)\n",
+                   i,
+                   tinypan_state_to_string(expected_states[i]),
+                   tinypan_state_to_string(g_state_history[i]));
+            tinypan_deinit();
+            return 1;
+        }
+    }
     
     /* Summary */
     printf("=====================================================\n");
@@ -246,17 +227,20 @@ int main(void) {
     printf("  [✓] L2CAP connection (PSM 0x000F)\n");
     printf("  [✓] BNEP handshake (PANU -> NAP)\n");
     printf("  [✓] Transition to DHCP state\n");
-    printf("  [✓] DHCP packet structure\n\n");
-    
-    printf("To complete IP acquisition:\n");
-    printf("  - Need lwIP integrated and running\n");
-    printf("  - lwIP sends DHCP Discover automatically\n");
-    printf("  - NAP (phone) responds with Offer -> Request -> ACK\n");
-    printf("  - IP address assigned, we go ONLINE!\n\n");
+    printf("  [✓] DHCP packet structure\n");
+    printf("  [✓] Transition to ONLINE via IP-acquired hook\n");
+    printf("  [✓] IP info readable through public API\n\n");
     
     /* Cleanup */
     printf("[Step 6] Cleanup\n");
     tinypan_stop();
+
+    if (g_disconnect_count != 1) {
+        printf("    FAILED: Expected 1 disconnect event after stop, got %d\n", g_disconnect_count);
+        tinypan_deinit();
+        return 1;
+    }
+
     tinypan_deinit();
     printf("    Done!\n\n");
     

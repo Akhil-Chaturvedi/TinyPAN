@@ -10,6 +10,10 @@
 #include "../include/tinypan_hal.h"
 #include <string.h>
 
+#if TINYPAN_ENABLE_LWIP
+#include "tinypan_lwip_netif.h"
+#endif
+
 /* ============================================================================
  * State
  * ============================================================================ */
@@ -344,8 +348,18 @@ void supervisor_on_bnep_setup_response(uint16_t response_code) {
         TINYPAN_LOG_INFO("BNEP setup successful");
         set_state(TINYPAN_STATE_DHCP);
         supervisor_on_bnep_connected();
-        
+
+#if TINYPAN_ENABLE_LWIP
+        tinypan_netif_set_link(true);
+        if (tinypan_netif_start_dhcp() < 0) {
+            TINYPAN_LOG_ERROR("Failed to start DHCP");
+            hal_bt_l2cap_disconnect();
+            set_state(TINYPAN_STATE_RECONNECTING);
+            schedule_reconnect();
+        }
+#else
         /* TODO: Start DHCP */
+#endif
     } else {
         TINYPAN_LOG_ERROR("BNEP setup rejected: 0x%04X", response_code);
         hal_bt_l2cap_disconnect();
@@ -368,6 +382,12 @@ void supervisor_on_ip_lost(void) {
     TINYPAN_LOG_WARN("IP lost");
     if (s_state == TINYPAN_STATE_ONLINE) {
         set_state(TINYPAN_STATE_DHCP);
+#if TINYPAN_ENABLE_LWIP
+        if (tinypan_netif_start_dhcp() < 0) {
+            TINYPAN_LOG_WARN("Failed to restart DHCP");
+        }
+#else
         /* TODO: Restart DHCP */
+#endif
     }
 }
