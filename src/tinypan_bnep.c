@@ -7,6 +7,7 @@
 #include "tinypan_bnep.h"
 #include "../include/tinypan_config.h"
 #include "../include/tinypan_hal.h"
+#include "../include/tinypan.h"
 #include <string.h>
 
 /* ============================================================================
@@ -434,7 +435,11 @@ int bnep_send_setup_request(void) {
     TINYPAN_LOG_DEBUG("Sending BNEP setup request (PANU -> NAP)");
     
     int result = hal_bt_l2cap_send(tx_buffer, (uint16_t)pkt_len);
-    if (result < 0) {
+    if (result > 0) {
+        TINYPAN_LOG_DEBUG("L2CAP busy, cannot send BNEP setup request");
+        hal_bt_l2cap_request_can_send_now();
+        return TINYPAN_ERR_BUSY;
+    } else if (result < 0) {
         TINYPAN_LOG_ERROR("Failed to send setup request: %d", result);
         return result;
     }
@@ -454,7 +459,11 @@ int bnep_send_setup_response(uint16_t response_code) {
     TINYPAN_LOG_DEBUG("Sending BNEP setup response: 0x%04X", response_code);
     
     int result = hal_bt_l2cap_send(tx_buffer, (uint16_t)pkt_len);
-    if (result < 0) {
+    if (result > 0) {
+        TINYPAN_LOG_DEBUG("L2CAP busy, cannot send BNEP setup response");
+        hal_bt_l2cap_request_can_send_now();
+        return TINYPAN_ERR_BUSY;
+    } else if (result < 0) {
         TINYPAN_LOG_ERROR("Failed to send setup response: %d", result);
         return result;
     }

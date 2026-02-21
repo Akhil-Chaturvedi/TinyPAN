@@ -65,6 +65,16 @@ void mock_hal_set_can_send(bool can_send);
  */
 bool mock_hal_is_connected(void);
 
+/**
+ * @brief Get pointer to the last transmitted frame (for test assertions)
+ */
+const uint8_t* mock_hal_get_last_tx_data(void);
+
+/**
+ * @brief Get length of the last transmitted frame (for test assertions)
+ */
+uint16_t mock_hal_get_last_tx_len(void);
+
 #ifdef __cplusplus
 }
 #endif

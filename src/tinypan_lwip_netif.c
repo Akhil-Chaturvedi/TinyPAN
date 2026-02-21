@@ -51,7 +51,7 @@ static bool s_initialized = false;
 /** Local MAC address (derived from Bluetooth address) */
 static uint8_t s_mac_addr[6] = {0};
 
-/* TX Queue State for handling L2CAP Busy (`ERR_WOULDBLOCK`) */
+/* TX Queue: holds pre-encapsulated BNEP frames when the radio is busy */
 #define TINYPAN_TX_QUEUE_LEN 8
 static struct pbuf* s_tx_queue[TINYPAN_TX_QUEUE_LEN] = {0};
 static uint8_t s_tx_queue_head = 0;
@@ -128,7 +128,70 @@ static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p) {
         return ERR_ARG;
     }
     
-    /* UNCONDITIONAL CLONE:
+    /* Check if we can use the true zero-copy fast path */
+    bool can_send_now = (s_tx_queue_head == s_tx_queue_tail) && hal_bt_l2cap_can_send();
+    
+    if (can_send_now) {
+        /* FAST PATH: ZERO ALLOCATIONS, ZERO COPIES
+           We manipulate the existing pbuf in-place, send it, and then revert the pointers
+           so lwIP's etharp_output can cleanly strip the 14-byte MAC header afterwards. */
+        uint8_t* eth_hdr = (uint8_t*)p->payload;
+        uint8_t dst_addr[6], src_addr[6];
+        memcpy(dst_addr, &eth_hdr[0], 6);
+        memcpy(src_addr, &eth_hdr[6], 6);
+        uint16_t ethertype = ((uint16_t)eth_hdr[12] << 8) | eth_hdr[13];
+
+        if (pbuf_remove_header(p, 14) != 0) {
+            TINYPAN_LOG_ERROR("netif: Fast-path failed to remove Ethernet header");
+            return ERR_ARG;
+        }
+
+        uint8_t header_len = bnep_get_ethernet_header_len(dst_addr, src_addr);
+
+        if (pbuf_add_header(p, header_len) != 0) {
+            TINYPAN_LOG_ERROR("netif: Fast-path failed to add BNEP headroom");
+            pbuf_add_header(p, 14); /* Revert */
+            return ERR_IF;
+        }
+
+        bnep_write_ethernet_header((uint8_t*)p->payload, header_len, dst_addr, src_addr, ethertype);
+
+        int result = hal_bt_l2cap_send(p->payload, p->tot_len);
+        if (result == 0) {
+            /* Sent successfully */
+        } else if (result < 0) {
+            TINYPAN_LOG_ERROR("netif: Fast-path failed to send BNEP frame: %d", result);
+        } else {
+            /* RACE CONDITION: L2CAP became busy just after our can_send check. 
+               We must queue this packet so it isn't dropped. Because `p` currently 
+               contains the exact BNEP-encapsulated frame we want, cloning it via 
+               PBUF_RAW captures the exact frame to enqueue perfectly. */
+            TINYPAN_LOG_DEBUG("netif: Fast-path race condition (busy), cloning to queue");
+            hal_bt_l2cap_request_can_send_now();
+            
+            struct pbuf* fallback_q = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
+            if (fallback_q != NULL) {
+                uint8_t next_tail = (s_tx_queue_tail + 1) % TINYPAN_TX_QUEUE_LEN;
+                if (next_tail == s_tx_queue_head) {
+                    TINYPAN_LOG_WARN("netif: TX queue full, dropping fast-path fallback");
+                    pbuf_free(fallback_q);
+                } else {
+                    s_tx_queue[s_tx_queue_tail] = fallback_q;
+                    s_tx_queue_tail = next_tail;
+                }
+            } else {
+                TINYPAN_LOG_ERROR("netif: Failed to clone fast-path fallback");
+            }
+        }
+
+        /* REVERT the pbuf so lwIP handles it correctly upon return */
+        pbuf_remove_header(p, header_len);
+        pbuf_add_header(p, 14);
+        
+        return ERR_OK;
+    }
+    
+    /* SLOW PATH (Radio Busy): Now we must queue it.
        Because etharp_output unconditionally strips the MAC header (pbuf_remove_header(p, 14))
        immediately after we return, queueing the original struct pbuf* p by reference is
        fatal. We must physically detach from lwIP's volatile sequence path by cloning 

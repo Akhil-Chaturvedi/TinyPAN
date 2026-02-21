@@ -200,9 +200,10 @@ bool bnep_is_connected(void);
 /**
  * @brief Send BNEP setup connection request
  * 
- * Sends: PANU (src) → NAP (dst)
+ * Sends: PANU (src) -> NAP (dst)
  * 
- * @return 0 on success, negative on error
+ * @return 0 on success, TINYPAN_ERR_BUSY if the radio is temporarily full
+ *         (caller should retry on HAL_L2CAP_EVENT_CAN_SEND_NOW), negative on error
  */
 int bnep_send_setup_request(void);
 
@@ -210,7 +211,7 @@ int bnep_send_setup_request(void);
  * @brief Send BNEP setup connection response
  * 
  * @param response_code Response code to send
- * @return 0 on success, negative on error
+ * @return 0 on success, TINYPAN_ERR_BUSY if the radio is temporarily full, negative on error
  */
 int bnep_send_setup_response(uint16_t response_code);
 

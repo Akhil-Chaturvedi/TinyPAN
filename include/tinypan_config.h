@@ -90,6 +90,8 @@
 
 /**
  * Enable heartbeat/link monitoring.
+ * Not implemented. This flag and the associated config fields
+ * (heartbeat_interval_ms, heartbeat_retries) are reserved for future use.
  */
 #ifndef TINYPAN_ENABLE_HEARTBEAT
 #define TINYPAN_ENABLE_HEARTBEAT            1

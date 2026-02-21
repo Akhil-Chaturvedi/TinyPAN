@@ -323,6 +323,14 @@ void supervisor_on_l2cap_event(int event, int status) {
             
         case HAL_L2CAP_EVENT_CAN_SEND_NOW:
             TINYPAN_LOG_DEBUG("L2CAP can send now (flushing queues)");
+            
+            /* If we were stalled sending the setup request, try again now */
+            if (s_state == TINYPAN_STATE_BNEP_SETUP) {
+                if (bnep_get_state() == BNEP_STATE_WAIT_FOR_CONNECTION_RESPONSE) {
+                    bnep_send_setup_request();
+                }
+            }
+            
 #if TINYPAN_ENABLE_LWIP
             tinypan_netif_drain_tx_queue();
 #endif
