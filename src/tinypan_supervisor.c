@@ -64,7 +64,7 @@ static int start_l2cap_connect(void) {
                       s_config.remote_addr[2], s_config.remote_addr[3],
                       s_config.remote_addr[4], s_config.remote_addr[5]);
     
-    return hal_bt_l2cap_connect(s_config.remote_addr, HAL_BNEP_PSM);
+    return hal_bt_l2cap_connect(s_config.remote_addr, HAL_BNEP_PSM, TINYPAN_L2CAP_MTU);
 }
 
 /**
@@ -394,4 +394,39 @@ void supervisor_on_ip_lost(void) {
         /* No lwIP: DHCP restart must be handled externally */
 #endif
     }
+}
+
+uint32_t supervisor_get_next_timeout_ms(void) {
+    if (s_state == TINYPAN_STATE_IDLE || s_state == TINYPAN_STATE_ONLINE || s_state == TINYPAN_STATE_ERROR) {
+        return 0xFFFFFFFF;
+    }
+
+    uint32_t now = hal_get_tick_ms();
+    uint32_t target_timeout = 0;
+    uint32_t base_time = s_state_enter_time;
+
+    switch (s_state) {
+        case TINYPAN_STATE_CONNECTING:
+            target_timeout = TINYPAN_L2CAP_CONNECT_TIMEOUT_MS;
+            break;
+        case TINYPAN_STATE_BNEP_SETUP:
+            target_timeout = TINYPAN_BNEP_SETUP_TIMEOUT_MS;
+            break;
+        case TINYPAN_STATE_DHCP:
+            target_timeout = TINYPAN_DHCP_TIMEOUT_MS;
+            break;
+        case TINYPAN_STATE_RECONNECTING:
+            target_timeout = s_reconnect_delay_ms;
+            base_time = s_last_action_time;
+            break;
+        default:
+            return 0xFFFFFFFF;
+    }
+
+    uint32_t elapsed = now - base_time;
+    if (elapsed >= target_timeout) {
+        return 0; /* Already timed out, wake up immediately */
+    }
+
+    return target_timeout - elapsed;
 }

@@ -164,14 +164,14 @@ void hal_bt_deinit(void) {
     s_event_callback = NULL;
 }
 
-int hal_bt_l2cap_connect(const uint8_t remote_addr[HAL_BD_ADDR_LEN], uint16_t psm) {
+int hal_bt_l2cap_connect(const uint8_t remote_addr[HAL_BD_ADDR_LEN], uint16_t psm, uint16_t local_mtu) {
     if (!s_initialized) {
         return -1;
     }
     
-    TINYPAN_LOG_INFO("[MOCK] L2CAP connect to %02X:%02X:%02X:%02X:%02X:%02X PSM=0x%04X",
+    TINYPAN_LOG_INFO("[MOCK] L2CAP connect to %02X:%02X:%02X:%02X:%02X:%02X PSM=0x%04X MTU=%u",
                       remote_addr[0], remote_addr[1], remote_addr[2],
-                      remote_addr[3], remote_addr[4], remote_addr[5], psm);
+                      remote_addr[3], remote_addr[4], remote_addr[5], psm, local_mtu);
     
     /* In mock mode, connection is not automatic.
        Test code must call mock_hal_simulate_connect_success() */
@@ -186,8 +186,7 @@ void hal_bt_l2cap_disconnect(void) {
     s_connected = false;
 }
 
-int hal_bt_l2cap_send_sg(const uint8_t* header, uint16_t header_len, 
-                         const uint8_t* payload, uint16_t payload_len) {
+int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
     if (!s_initialized) {
         return -1;
     }
@@ -202,24 +201,20 @@ int hal_bt_l2cap_send_sg(const uint8_t* header, uint16_t header_len,
         return 1;  /* Busy */
     }
     
-    uint16_t total_len = header_len + payload_len;
-    TINYPAN_LOG_DEBUG("[MOCK] Sending %u bytes (sg):", total_len);
+    TINYPAN_LOG_DEBUG("[MOCK] Sending %u bytes:", len);
     
-    if (total_len <= sizeof(s_last_tx_data)) {
-        if (header != NULL && header_len > 0) {
-            memcpy(s_last_tx_data, header, header_len);
+    if (len <= sizeof(s_last_tx_data)) {
+        if (data != NULL && len > 0) {
+            memcpy(s_last_tx_data, data, len);
         }
-        if (payload != NULL && payload_len > 0) {
-            memcpy(s_last_tx_data + header_len, payload, payload_len);
-        }
-        s_last_tx_len = total_len;
+        s_last_tx_len = len;
     }
     
     /* Print hex dump for debugging */
     #if TINYPAN_ENABLE_DEBUG
     char hex_buf[256];
     int pos = 0;
-    for (uint16_t i = 0; i < total_len && pos < 240; i++) {
+    for (uint16_t i = 0; i < len && pos < 240; i++) {
         pos += snprintf(hex_buf + pos, sizeof(hex_buf) - pos, "%02X ", s_last_tx_data[i]);
     }
     TINYPAN_LOG_DEBUG("[MOCK] TX: %s", hex_buf);

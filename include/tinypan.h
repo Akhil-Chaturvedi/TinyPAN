@@ -160,7 +160,7 @@ void tinypan_stop(void);
  * @brief Process TinyPAN events
  * 
  * Must be called periodically from main loop or a timer.
- * Handles state machine transitions, timeouts, and heartbeats.
+ * Handles state machine transitions and timeouts.
  */
 void tinypan_process(void);
 

@@ -433,7 +433,7 @@ int bnep_send_setup_request(void) {
     
     TINYPAN_LOG_DEBUG("Sending BNEP setup request (PANU -> NAP)");
     
-    int result = hal_bt_l2cap_send_sg(tx_buffer, (uint16_t)pkt_len, NULL, 0);
+    int result = hal_bt_l2cap_send(tx_buffer, (uint16_t)pkt_len);
     if (result < 0) {
         TINYPAN_LOG_ERROR("Failed to send setup request: %d", result);
         return result;
@@ -453,7 +453,7 @@ int bnep_send_setup_response(uint16_t response_code) {
     
     TINYPAN_LOG_DEBUG("Sending BNEP setup response: 0x%04X", response_code);
     
-    int result = hal_bt_l2cap_send_sg(tx_buffer, (uint16_t)pkt_len, NULL, 0);
+    int result = hal_bt_l2cap_send(tx_buffer, (uint16_t)pkt_len);
     if (result < 0) {
         TINYPAN_LOG_ERROR("Failed to send setup response: %d", result);
         return result;
@@ -465,7 +465,7 @@ int bnep_send_setup_response(uint16_t response_code) {
 int bnep_send_ethernet_frame(const uint8_t* dst_addr,
                               const uint8_t* src_addr,
                               uint16_t ethertype,
-                              const uint8_t* payload,
+                              uint8_t* payload,
                               uint16_t payload_len) {
     if (s_state != BNEP_STATE_CONNECTED) {
         TINYPAN_LOG_WARN("Cannot send frame: not connected (state=%d)", s_state);
@@ -479,10 +479,10 @@ int bnep_send_ethernet_frame(const uint8_t* dst_addr,
     
     int header_len;
     
-    /* We build only the header into a safe local buffer (max 15 bytes),
-       then use the scatter-gather API to send it alongside the payload pointer.
-       This is completely reentrant and requires no massive static buffers. */
-    uint8_t header[15];
+    /* The caller (tinypan_lwip_netif) guarantees at least 15 bytes of
+       headroom before the payload pointer (via PBUF_LINK_ENCAPSULATION_HLEN).
+       We back up the pointer, write the BNEP header, and send as one
+       contiguous block through the HAL. */
     
 #if TINYPAN_ENABLE_COMPRESSION
     /* Check if we can use compression */
@@ -491,27 +491,23 @@ int bnep_send_ethernet_frame(const uint8_t* dst_addr,
     
     if (can_compress_dst && can_compress_src) {
         /* Fully compressed */
-        header_len = bnep_build_compressed_ethernet(header, sizeof(header),
-                                                    ethertype, NULL, 0);
+        header_len = 3;
+        payload -= header_len;
+        bnep_build_compressed_ethernet(payload, header_len, ethertype, NULL, 0);
     } else {
         /* General Ethernet (no compression) */
-        header_len = bnep_build_general_ethernet(header, sizeof(header),
-                                                 dst_addr, src_addr, ethertype,
-                                                 NULL, 0);
+        header_len = 15;
+        payload -= header_len;
+        bnep_build_general_ethernet(payload, header_len, dst_addr, src_addr, ethertype, NULL, 0);
     }
 #else
     /* Always use general Ethernet */
-    header_len = bnep_build_general_ethernet(header, sizeof(header),
-                                             dst_addr, src_addr, ethertype,
-                                             NULL, 0);
+    header_len = 15;
+    payload -= header_len;
+    bnep_build_general_ethernet(payload, header_len, dst_addr, src_addr, ethertype, NULL, 0);
 #endif
     
-    if (header_len < 0) {
-        TINYPAN_LOG_ERROR("Failed to build BNEP header");
-        return -1;
-    }
-    
-    int result = hal_bt_l2cap_send_sg(header, (uint16_t)header_len, payload, payload_len);
+    int result = hal_bt_l2cap_send(payload, header_len + payload_len);
     if (result > 0) {
         /* Busy */
         hal_bt_l2cap_request_can_send_now();
@@ -587,7 +583,7 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
                     resp_type,
                     0x00, 0x01  /* Unsupported Request */
                 };
-                hal_bt_l2cap_send_sg(resp, sizeof(resp), NULL, 0);
+                hal_bt_l2cap_send(resp, sizeof(resp));
             }
             break;
             
@@ -604,7 +600,7 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
                     BNEP_CTRL_COMMAND_NOT_UNDERSTOOD,
                     control_type
                 };
-                hal_bt_l2cap_send_sg(resp, sizeof(resp), NULL, 0);
+                hal_bt_l2cap_send(resp, sizeof(resp));
             }
             break;
     }

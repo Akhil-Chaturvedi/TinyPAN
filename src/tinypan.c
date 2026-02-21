@@ -249,13 +249,10 @@ uint32_t tinypan_get_next_timeout_ms(void) {
 #endif
 
     /* TinyPAN has its own internal state machine timeouts.
-       If we're actively connecting or running the BNEP handshake, clamp sleep
-       to 50ms to ensure we don't miss Supervisor-level timeout transitions. */
-    tinypan_state_t state = supervisor_get_state();
-    if (state != TINYPAN_STATE_IDLE && state != TINYPAN_STATE_ONLINE && state != TINYPAN_STATE_ERROR) {
-        if (sleep_ms > 50) {
-            sleep_ms = 50;
-        }
+       Get the exact time remaining until the next supervisor state transition. */
+    uint32_t sup_sleep = supervisor_get_next_timeout_ms();
+    if (sup_sleep < sleep_ms) {
+        sleep_ms = sup_sleep;
     }
 
     return sleep_ms;

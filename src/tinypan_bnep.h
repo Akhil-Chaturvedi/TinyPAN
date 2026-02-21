@@ -220,14 +220,14 @@ int bnep_send_setup_response(uint16_t response_code);
  * @param dst_addr      Destination MAC address (6 bytes)
  * @param src_addr      Source MAC address (6 bytes)
  * @param ethertype     EtherType (e.g., 0x0800 for IPv4)
- * @param payload       Pointer to payload data
- * @param payload_len   Length of payload
- * @return 0 on success, negative on error, positive if busy
+ * @param payload       Pointer to IP payload (must have at least 15 bytes of headroom allocated before it)
+ * @param payload_len   Length of IP payload
+ * @return 0 on success, negative error code on failure, positive if busy
  */
 int bnep_send_ethernet_frame(const uint8_t* dst_addr,
                               const uint8_t* src_addr,
                               uint16_t ethertype,
-                              const uint8_t* payload,
+                              uint8_t* payload,
                               uint16_t payload_len);
 
 /* ----------------------------------------------------------------------------

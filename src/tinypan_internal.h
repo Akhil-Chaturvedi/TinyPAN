@@ -14,6 +14,11 @@ extern "C" {
  */
 void tinypan_internal_set_ip(uint32_t ip, uint32_t netmask, uint32_t gw, uint32_t dns);
 
+/**
+ * @brief Returns the exact number of milliseconds until the next supervisor state timeout.
+ */
+uint32_t supervisor_get_next_timeout_ms(void);
+
 #ifdef __cplusplus
 }
 #endif

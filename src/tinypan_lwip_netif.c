@@ -119,57 +119,22 @@ static err_t tinypan_netif_init_callback(struct netif* netif) {
  * @param p     Pbuf chain containing the Ethernet frame
  * @return ERR_OK on success, error code otherwise
  */
-/**
- * @brief Helper to attempt sending a single pbuf immediately
- */
-static err_t do_send_pbuf(struct pbuf* p) {
+static int do_send_pbuf(struct pbuf* q) {
     /* Extract Ethernet header */
-    uint8_t* data = (uint8_t*)p->payload;
-    uint8_t* dst_addr = &data[0];
-    uint8_t* src_addr = &data[6];
-    uint16_t ethertype = ((uint16_t)data[12] << 8) | data[13];
-    uint8_t* payload = &data[14];
-    uint16_t payload_len = (uint16_t)(p->tot_len - 14);
+    uint8_t* eth_hdr = (uint8_t*)q->payload;
+    uint8_t dst_addr[6], src_addr[6];
+    memcpy(dst_addr, &eth_hdr[0], 6);
+    memcpy(src_addr, &eth_hdr[6], 6);
+    uint16_t ethertype = ((uint16_t)eth_hdr[12] << 8) | eth_hdr[13];
     
-    struct pbuf* q = NULL;
+    /* IP payload starts immediately after the 14-byte Ethernet header */
+    uint8_t* ip_payload = eth_hdr + 14;
+    uint16_t ip_len = q->tot_len - 14;
     
-    /* Handle chained pbufs by copying to a contiguous pbuf using lwIP's
-       thread-safe memory allocator instead of a static reentrancy-trap buffer. */
-    if (p->next != NULL) {
-        /* PBUF_RAM ensures it's contiguous */
-        q = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
-        if (q == NULL) {
-            TINYPAN_LOG_WARN("netif: Failed to clone pbuf");
-            return ERR_MEM;
-        }
-        
-        /* Re-point to the cloned contiguous memory */
-        uint8_t* q_data = (uint8_t*)q->payload;
-        dst_addr = &q_data[0];
-        src_addr = &q_data[6];
-        ethertype = ((uint16_t)q_data[12] << 8) | q_data[13];
-        payload = &q_data[14];
-    }
-    
-    /* Send via BNEP */
-    int result = bnep_send_ethernet_frame(dst_addr, src_addr, ethertype,
-                                           payload, payload_len);
-                                           
-    if (q != NULL) {
-        pbuf_free(q);
-    }
-    
-    if (result < 0) {
-        TINYPAN_LOG_WARN("netif: BNEP send failed: %d", result);
-        return ERR_IF;
-    }
-    
-    if (result > 0) {
-        /* Busy */
-        return ERR_WOULDBLOCK;
-    }
-    
-    return ERR_OK;
+    /* Send via BNEP. The BNEP layer backs up the ip_payload pointer
+       into the PBUF_LINK_ENCAPSULATION_HLEN headroom, writes the BNEP
+       header there, and passes a single contiguous pointer to the HAL. */
+    return bnep_send_ethernet_frame(dst_addr, src_addr, ethertype, ip_payload, ip_len);
 }
 
 static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p) {
@@ -190,31 +155,52 @@ static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p) {
         return ERR_ARG;
     }
     
-    /* If the queue is empty, attempt immediate dispatch */
-    bool queue_was_empty = (s_tx_queue_head == s_tx_queue_tail);
-    if (queue_was_empty) {
-        err_t err = do_send_pbuf(p);
-        if (err != ERR_WOULDBLOCK) {
-            return err; /* Successfully sent or fatal error */
+    struct pbuf* q = NULL;
+    
+    /* If the pbuf is chained, flatten it into a contiguous PBUF_RAM block
+       once. If it is already a single segment, just take a reference.
+       Either way, the queued pointer is contiguous and ready to send
+       without further copies on dequeue. */
+    if (p->next != NULL) {
+        q = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
+        if (q == NULL) {
+            TINYPAN_LOG_WARN("netif: Failed to clone pbuf");
+            return ERR_MEM;
         }
+    } else {
+        q = p;
+        pbuf_ref(q);
     }
     
-    /* If we get here, either the queue wasn't empty (we must queue to maintain order),
-       or we just got ERR_WOULDBLOCK trying to send the packet. */
-       
+    /* If the queue had items, we MUST queue to maintain order */
+    bool queue_was_empty = (s_tx_queue_head == s_tx_queue_tail);
+    
+    if (queue_was_empty) {
+        int result = do_send_pbuf(q);
+        if (result == 0) {
+            pbuf_free(q);
+            return ERR_OK;
+        } else if (result < 0) {
+            pbuf_free(q);
+            return ERR_IF;
+        }
+        /* result > 0 means ERR_WOULDBLOCK. Fall through to queueing. */
+    }
+    
+    /* Queue the pbuf (q is already contiguous and ref'd/cloned) */
     uint8_t next_tail = (s_tx_queue_tail + 1) % TINYPAN_TX_QUEUE_LEN;
     if (next_tail == s_tx_queue_head) {
         TINYPAN_LOG_WARN("netif: TX queue full, dropping packet");
+        pbuf_free(q);
         return ERR_MEM;
     }
     
-    TINYPAN_LOG_DEBUG("netif: L2CAP busy, queueing pbuf (len=%u)", p->tot_len);
+    TINYPAN_LOG_DEBUG("netif: L2CAP busy, queueing pbuf (len=%u)", q->tot_len);
     
-    pbuf_ref(p);
-    s_tx_queue[s_tx_queue_tail] = p;
+    s_tx_queue[s_tx_queue_tail] = q;
     s_tx_queue_tail = next_tail;
     
-    /* Return ERR_OK to lwIP so it doesn't drop the packet from its internal layers */
+    /* Return ERR_OK to lwIP so it doesn't drop the packet */
     return ERR_OK;
 }
 
@@ -454,9 +440,9 @@ void tinypan_netif_drain_tx_queue(void) {
     while (s_tx_queue_head != s_tx_queue_tail) {
         struct pbuf* p = s_tx_queue[s_tx_queue_head];
         
-        err_t err = do_send_pbuf(p);
-        if (err == ERR_WOULDBLOCK) {
-            /* Still blocked - stop draining and leave at head */
+        int result = do_send_pbuf(p);
+        if (result > 0) {
+            /* Still blocked (busy) - stop draining and leave at head */
             break;
         }
         

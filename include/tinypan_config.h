@@ -22,6 +22,14 @@
 #endif
 
 /**
+ * Maximum Transmission Unit for the L2CAP BNEP channel.
+ * BNEP standard requires a minimum of 1691 bytes.
+ */
+#ifndef TINYPAN_L2CAP_MTU
+#define TINYPAN_L2CAP_MTU               1691
+#endif
+
+/**
  * Size of the receive buffer.
  */
 #ifndef TINYPAN_RX_BUFFER_SIZE

@@ -95,9 +95,10 @@ void hal_bt_deinit(void);
  * 
  * @param remote_addr   6-byte Bluetooth device address
  * @param psm           Protocol/Service Multiplexer (use HAL_BNEP_PSM for BNEP)
+ * @param local_mtu     Maximum Transmission Unit to negotiate (minimum 1691 for BNEP)
  * @return 0 on success (connection initiated), negative error code on failure
  */
-int hal_bt_l2cap_connect(const uint8_t remote_addr[HAL_BD_ADDR_LEN], uint16_t psm);
+int hal_bt_l2cap_connect(const uint8_t remote_addr[HAL_BD_ADDR_LEN], uint16_t psm, uint16_t local_mtu);
 
 /**
  * @brief Disconnect the current L2CAP channel
@@ -108,21 +109,17 @@ int hal_bt_l2cap_connect(const uint8_t remote_addr[HAL_BD_ADDR_LEN], uint16_t ps
 void hal_bt_l2cap_disconnect(void);
 
 /**
- * @brief Send data over the L2CAP channel using scatter-gather
+ * @brief Send data over the L2CAP channel
  * 
- * To avoid allocating 1500-byte temporary static buffers for prepend operations,
- * the HAL uses a scatter-gather approach. The underlying Bluetooth driver should
- * send the header immediately followed by the payload, or copy them both directly
- * into the hardware Tx FIFO.
+ * Sends a single contiguous buffer over the L2CAP channel.
+ * The buffer contains the BNEP header followed by the IP payload,
+ * written contiguously via PBUF_LINK_ENCAPSULATION_HLEN headroom.
  * 
- * @param header       Pointer to the BNEP header
- * @param header_len   Length of the BNEP header
- * @param payload      Pointer to the IP payload (can be NULL if unsupported)
- * @param payload_len  Length of the IP payload
+ * @param data         Pointer to the BNEP frame (header + payload)
+ * @param len          Total length of the frame
  * @return 0 on success, negative error code on failure, positive if busy (try again)
  */
-int hal_bt_l2cap_send_sg(const uint8_t* header, uint16_t header_len, 
-                         const uint8_t* payload, uint16_t payload_len);
+int hal_bt_l2cap_send(const uint8_t* data, uint16_t len);
 
 /**
  * @brief Check if the L2CAP channel is ready to send data

@@ -42,6 +42,9 @@
 #define PBUF_POOL_SIZE              4
 #define PBUF_POOL_BUFSIZE           1500
 
+/* Reserve space at the head of every pbuf for the BNEP encapsulation header */
+#define PBUF_LINK_ENCAPSULATION_HLEN 15
+
 /* System timers (using TinyPAN HAL) */
 #define SYS_LIGHTWEIGHT_PROT        0
 

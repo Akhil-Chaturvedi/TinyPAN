@@ -4,11 +4,11 @@ TinyPAN is a lightweight C library that implements a Bluetooth PAN (Personal Are
 
 ## Architecture
 
-The library targets constrained embedded platforms (ESP32, nRF52, etc.) and avoids heap allocation. The TX path uses a scatter-gather HAL API to avoid large intermediate copy buffers — the BNEP layer builds a small header on the stack and passes it alongside the original IP payload pointer directly to the hardware driver.
+The library targets constrained embedded platforms (ESP32, nRF52, etc.) and avoids heap allocation. The TX path uses lwIP's `PBUF_LINK_ENCAPSULATION_HLEN` to reserve 15 bytes of headroom in every outgoing pbuf. The BNEP layer writes its header directly into that headroom and hands a single contiguous pointer to the HAL, so no intermediate copy buffer is needed for single-segment pbufs.
 
-If the Bluetooth radio is temporarily busy, outgoing packets are held in an internal TX queue (ring buffer of pbuf references) and drained automatically when the radio signals readiness via `HAL_L2CAP_EVENT_CAN_SEND_NOW`.
+If the Bluetooth radio is temporarily busy, outgoing packets are held in an internal TX queue (ring buffer of pbuf pointers) and drained automatically when the radio signals readiness via `HAL_L2CAP_EVENT_CAN_SEND_NOW`. Chained pbufs are flattened via `pbuf_clone()` exactly once before entering the queue.
 
-The core loop is a single-threaded polling pump driven by `tinypan_process()`. For power-sensitive applications, `tinypan_get_next_timeout_ms()` returns the number of milliseconds until the next scheduled event, allowing the MCU to sleep (WFI) instead of polling continuously.
+The core loop is a single-threaded polling pump driven by `tinypan_process()`. For power-sensitive applications, `tinypan_get_next_timeout_ms()` returns the exact number of milliseconds until the next scheduled event (state machine timeout or lwIP timer), allowing the MCU to enter WFI instead of polling.
 
 Compiled size metrics (GCC, x86_64):
 * **RAM (bss + data):** ~192 bytes
@@ -46,10 +46,11 @@ TinyPAN/
 To run TinyPAN on real hardware, implement the functions declared in `tinypan_hal.h`:
 
 1. **`hal_get_tick_ms()`** — Return a monotonic millisecond counter (e.g., `xTaskGetTickCount() * portTICK_PERIOD_MS` on FreeRTOS).
-2. **`hal_bt_l2cap_send_sg(header, header_len, payload, payload_len)`** — Transmit the header and payload buffers over the L2CAP channel assigned to BNEP (PSM 0x000F). The two buffers must be sent as a single contiguous L2CAP frame.
-3. **`hal_bt_l2cap_can_send()`** — Return whether the L2CAP channel can accept a new frame.
-4. **`hal_bt_l2cap_request_can_send_now()`** — Request a `HAL_L2CAP_EVENT_CAN_SEND_NOW` callback when the channel becomes writable.
-5. **Receive path** — When the Bluetooth stack receives L2CAP data on the BNEP PSM, call the registered receive callback (see `hal_bt_l2cap_register_recv_callback`).
+2. **`hal_bt_l2cap_send(data, len)`** — Transmit a single contiguous buffer over the L2CAP channel assigned to BNEP (PSM 0x000F). The buffer contains both the BNEP header and IP payload.
+3. **`hal_bt_l2cap_connect(addr, psm, local_mtu)`** — Initiate an L2CAP connection. `local_mtu` should be at least 1691 for BNEP.
+4. **`hal_bt_l2cap_can_send()`** — Return whether the L2CAP channel can accept a new frame.
+5. **`hal_bt_l2cap_request_can_send_now()`** — Request a `HAL_L2CAP_EVENT_CAN_SEND_NOW` callback when the channel becomes writable.
+6. **Receive path** — When the Bluetooth stack receives L2CAP data on the BNEP PSM, call the registered receive callback (see `hal_bt_l2cap_register_recv_callback`).
 
 See `hal/mock/` for a reference implementation.
 
@@ -79,13 +80,15 @@ The suite includes:
 
 ## Design Constraints
 
-- **Single-threaded.** All calls to TinyPAN functions and the HAL receive callback must run in the same execution context. There is no internal synchronization.
+- **Single-threaded.** All calls to TinyPAN functions and the HAL receive callback must run in the same execution context. There is no internal synchronization. If your Bluetooth stack delivers L2CAP callbacks from a hardware ISR or high-priority RTOS task (e.g., ESP-IDF Bluedroid, Zephyr, NimBLE), you must bounce these events through an OS message queue and process them in the same context as `tinypan_process()`. Calling TinyPAN or lwIP functions directly from an ISR will corrupt internal queues and state.
 
-- **TX path copies chained pbufs.** If lwIP produces a chained (non-contiguous) pbuf, `tinypan_lwip_netif` clones it into a single contiguous pbuf using `pbuf_clone()` before extracting the Ethernet header fields. Single-segment pbufs (the common case for DHCP and small packets) are sent without any copy.
+- **TX path flattens chained pbufs.** If lwIP produces a chained (non-contiguous) pbuf, the netif layer clones it into a single contiguous `PBUF_RAM` block via `pbuf_clone()` before sending. This clone happens at most once per packet; if the radio is busy, the already-flattened clone is queued directly. Single-segment pbufs (the common case for DHCP and small packets) are sent without any copy.
 
-- **TX queue is bounded.** The internal TX queue holds up to `TINYPAN_TX_QUEUE_LEN` (default 8) packets. If the queue is full, the packet is dropped and `ERR_BUF` is returned to lwIP. This is unlikely under normal DHCP/ARP traffic but could matter for high-throughput use cases.
+- **TX queue is bounded.** The internal TX queue holds up to `TINYPAN_TX_QUEUE_LEN` (default 8) packets. If the queue is full, the packet is dropped and `ERR_MEM` is returned to lwIP.
 
 - **BNEP filter requests are declined.** When the NAP sends BNEP filter set requests, TinyPAN responds with `0x0001` (Unsupported Request). This is spec-compliant and means the NAP must handle its own filtering.
+
+- **Heartbeat/keepalive is not implemented.** The `TINYPAN_ENABLE_HEARTBEAT` config flag and associated fields in `tinypan_config_t` exist in the API but the supervisor does not act on them. Link health monitoring is a planned feature.
 
 ## License
 
