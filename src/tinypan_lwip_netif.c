@@ -110,33 +110,6 @@ static err_t tinypan_netif_init_callback(struct netif* netif) {
  * Output Functions (Sending)
  * ============================================================================ */
 
-/**
- * @brief Low-level output function - sends Ethernet frame over BNEP
- * 
- * Called by lwIP when it needs to send an Ethernet frame.
- * 
- * @param netif The network interface
- * @param p     Pbuf chain containing the Ethernet frame
- * @return ERR_OK on success, error code otherwise
- */
-static int do_send_pbuf(struct pbuf* q) {
-    /* Extract Ethernet header */
-    uint8_t* eth_hdr = (uint8_t*)q->payload;
-    uint8_t dst_addr[6], src_addr[6];
-    memcpy(dst_addr, &eth_hdr[0], 6);
-    memcpy(src_addr, &eth_hdr[6], 6);
-    uint16_t ethertype = ((uint16_t)eth_hdr[12] << 8) | eth_hdr[13];
-    
-    /* IP payload starts immediately after the 14-byte Ethernet header */
-    uint8_t* ip_payload = eth_hdr + 14;
-    uint16_t ip_len = q->tot_len - 14;
-    
-    /* Send via BNEP. The BNEP layer backs up the ip_payload pointer
-       into the PBUF_LINK_ENCAPSULATION_HLEN headroom, writes the BNEP
-       header there, and passes a single contiguous pointer to the HAL. */
-    return bnep_send_ethernet_frame(dst_addr, src_addr, ethertype, ip_payload, ip_len);
-}
-
 static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p) {
     (void)netif;
     
@@ -155,52 +128,88 @@ static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p) {
         return ERR_ARG;
     }
     
-    struct pbuf* q = NULL;
-    
-    /* If the pbuf is chained, flatten it into a contiguous PBUF_RAM block
-       once. If it is already a single segment, just take a reference.
-       Either way, the queued pointer is contiguous and ready to send
-       without further copies on dequeue. */
-    if (p->next != NULL) {
-        q = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
-        if (q == NULL) {
-            TINYPAN_LOG_WARN("netif: Failed to clone pbuf");
-            return ERR_MEM;
-        }
-    } else {
-        q = p;
-        pbuf_ref(q);
+    /* UNCONDITIONAL CLONE:
+       Because etharp_output unconditionally strips the MAC header (pbuf_remove_header(p, 14))
+       immediately after we return, queueing the original struct pbuf* p by reference is
+       fatal. We must physically detach from lwIP's volatile sequence path by cloning 
+       every packet into a contiguous PBUF_RAM block before modifying it. 
+       
+       CRITICAL: We cannot use pbuf_clone(PBUF_RAW, ...). It allocates exactly `p->tot_len` 
+       and destroys the PBUF_LINK_ENCAPSULATION_HLEN headroom. We must manually allocate a
+       PBUF_LINK to restore the headroom, then copy the payload. */
+    struct pbuf* q = pbuf_alloc(PBUF_LINK, p->tot_len, PBUF_RAM);
+    if (q == NULL) {
+        TINYPAN_LOG_WARN("netif: Failed to allocate pbuf for asynchronous TX");
+        return ERR_MEM;
     }
     
-    /* If the queue had items, we MUST queue to maintain order */
-    bool queue_was_empty = (s_tx_queue_head == s_tx_queue_tail);
-    
-    if (queue_was_empty) {
-        int result = do_send_pbuf(q);
-        if (result == 0) {
-            pbuf_free(q);
-            return ERR_OK;
-        } else if (result < 0) {
-            pbuf_free(q);
-            return ERR_IF;
+    if (pbuf_copy(q, p) != ERR_OK) {
+        TINYPAN_LOG_WARN("netif: Failed to copy pbuf payload");
+        pbuf_free(q);
+        return ERR_MEM;
+    }
+
+    /* Extract MAC addresses and Ethertype BEFORE removing the header */
+    uint8_t* eth_hdr = (uint8_t*)q->payload;
+    uint8_t dst_addr[6], src_addr[6];
+    memcpy(dst_addr, &eth_hdr[0], 6);
+    memcpy(src_addr, &eth_hdr[6], 6);
+    uint16_t ethertype = ((uint16_t)eth_hdr[12] << 8) | eth_hdr[13];
+
+    /* Safely strip the 14-byte Ethernet header using the lwIP API */
+    if (pbuf_remove_header(q, 14) != 0) {
+        TINYPAN_LOG_ERROR("netif: Failed to remove Ethernet header");
+        pbuf_free(q);
+        return ERR_ARG;
+    }
+
+    /* Query how many bytes the BNEP header needs */
+    uint8_t header_len = bnep_get_ethernet_header_len(dst_addr, src_addr);
+
+    /* Safely claim the exact BNEP headroom using the lwIP API (unhides the PBUF_LINK_ENCAPSULATION_HLEN bytes) */
+    if (pbuf_add_header(q, header_len) != 0) {
+        TINYPAN_LOG_ERROR("netif: Failed to add BNEP headroom");
+        pbuf_free(q);
+        return ERR_IF;
+    }
+
+    /* Write the native BNEP header into the newly exposed headroom */
+    bnep_write_ethernet_header((uint8_t*)q->payload, header_len, dst_addr, src_addr, ethertype);
+
+    /* `q` is now a fully encapsulated BNEP frame. Attempt to send it. */
+    if (s_tx_queue_head == s_tx_queue_tail) {
+        if (!hal_bt_l2cap_can_send()) {
+            hal_bt_l2cap_request_can_send_now();
+            /* Busy, fall through to queueing */
+        } else {
+            int result = hal_bt_l2cap_send(q->payload, q->tot_len);
+            if (result == 0) {
+                pbuf_free(q);
+                return ERR_OK; /* Sent successfully */
+            } else if (result < 0) {
+                TINYPAN_LOG_ERROR("netif: Failed to send BNEP frame: %d", result);
+                pbuf_free(q);
+                return ERR_IF;
+            } else {
+                hal_bt_l2cap_request_can_send_now();
+                /* Busy (race condition), fall through to queueing */
+            }
         }
-        /* result > 0 means ERR_WOULDBLOCK. Fall through to queueing. */
     }
     
-    /* Queue the pbuf (q is already contiguous and ref'd/cloned) */
+    /* Queue the heavily modified/cloned pbuf (q) */
     uint8_t next_tail = (s_tx_queue_tail + 1) % TINYPAN_TX_QUEUE_LEN;
     if (next_tail == s_tx_queue_head) {
-        TINYPAN_LOG_WARN("netif: TX queue full, dropping packet");
+        TINYPAN_LOG_WARN("netif: TX queue full, dropping queued BNEP frame");
         pbuf_free(q);
         return ERR_MEM;
     }
     
-    TINYPAN_LOG_DEBUG("netif: L2CAP busy, queueing pbuf (len=%u)", q->tot_len);
-    
+    TINYPAN_LOG_DEBUG("netif: L2CAP busy, queueing BNEP frame (len=%u)", q->tot_len);
     s_tx_queue[s_tx_queue_tail] = q;
     s_tx_queue_tail = next_tail;
     
-    /* Return ERR_OK to lwIP so it doesn't drop the packet */
+    /* Always return ERR_OK to lwIP so it tears down the original `p` immediately */
     return ERR_OK;
 }
 
@@ -438,17 +447,30 @@ void tinypan_netif_drain_tx_queue(void) {
     }
     
     while (s_tx_queue_head != s_tx_queue_tail) {
-        struct pbuf* p = s_tx_queue[s_tx_queue_head];
-        
-        int result = do_send_pbuf(p);
-        if (result > 0) {
-            /* Still blocked (busy) - stop draining and leave at head */
-            break;
+        if (!hal_bt_l2cap_can_send()) {
+            hal_bt_l2cap_request_can_send_now();
+            break; /* Still busy, will try again on next callback */
         }
         
-        /* Successfully sent (or fatal error) - pop from queue */
-        s_tx_queue_head = (s_tx_queue_head + 1) % TINYPAN_TX_QUEUE_LEN;
-        pbuf_free(p); /* Release the ref we took when queueing */
+        struct pbuf* q = s_tx_queue[s_tx_queue_head];
+        
+        /* The queue contains purely encapsulated BNEP frames. Send directly. */
+        int result = hal_bt_l2cap_send(q->payload, q->tot_len);
+        
+        if (result == 0) {
+            /* Sent successfully */
+            s_tx_queue_head = (s_tx_queue_head + 1) % TINYPAN_TX_QUEUE_LEN;
+            pbuf_free(q);
+        } else if (result > 0) {
+            /* Race condition: became busy while sending */
+            hal_bt_l2cap_request_can_send_now();
+            break;
+        } else {
+            /* Hard error (e.g. disconnected) */
+            TINYPAN_LOG_ERROR("netif: Queue flush failed: %d", result);
+            s_tx_queue_head = (s_tx_queue_head + 1) % TINYPAN_TX_QUEUE_LEN;
+            pbuf_free(q);
+        }
     }
 }
 

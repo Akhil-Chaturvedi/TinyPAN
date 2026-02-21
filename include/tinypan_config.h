@@ -155,8 +155,8 @@
 
 /**
  * Byte order helpers.
- * When lwIP is enabled, we route these to lwIP's highly optimized compiler intrinsics.
- * Otherwise, use the fallback overrides.
+ * When lwIP is enabled, these map to lwIP's byte-swap macros.
+ * Otherwise, portable fallback implementations are used.
  */
 #if TINYPAN_ENABLE_LWIP
 #include "lwip/def.h"

@@ -88,8 +88,8 @@ typedef struct {
     tinypan_bd_addr_t remote_addr;  /**< Bluetooth address of NAP (phone) */
     uint16_t reconnect_interval_ms; /**< Initial reconnection delay (default: 1000) */
     uint16_t reconnect_max_ms;      /**< Maximum reconnection delay (default: 30000) */
-    uint16_t heartbeat_interval_ms; /**< Link monitoring interval (default: 15000) */
-    uint8_t  heartbeat_retries;     /**< Retries before declaring link dead (default: 3) */
+    uint16_t heartbeat_interval_ms; /**< Link monitoring interval (default: 15000). Not implemented. */
+    uint8_t  heartbeat_retries;     /**< Retries before declaring link dead (default: 3). Not implemented. */
     uint8_t  max_reconnect_attempts;/**< Maximum reconnect attempts, 0 = infinite (default: 0) */
 } tinypan_config_t;
 

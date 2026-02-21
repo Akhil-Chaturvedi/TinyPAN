@@ -4,9 +4,9 @@ TinyPAN is a lightweight C library that implements a Bluetooth PAN (Personal Are
 
 ## Architecture
 
-The library targets constrained embedded platforms (ESP32, nRF52, etc.) and avoids heap allocation. The TX path uses lwIP's `PBUF_LINK_ENCAPSULATION_HLEN` to reserve 15 bytes of headroom in every outgoing pbuf. The BNEP layer writes its header directly into that headroom and hands a single contiguous pointer to the HAL, so no intermediate copy buffer is needed for single-segment pbufs.
+The library targets constrained embedded platforms (ESP32, nRF52, etc.) and avoids heap allocation. The TX path unconditionally clones every outgoing pbuf into a contiguous `PBUF_RAM` block, strips the Ethernet header via `pbuf_remove_header`, then claims the BNEP headroom via `pbuf_add_header` and writes the BNEP protocol header in-place. The result is a single contiguous buffer passed to the HAL.
 
-If the Bluetooth radio is temporarily busy, outgoing packets are held in an internal TX queue (ring buffer of pbuf pointers) and drained automatically when the radio signals readiness via `HAL_L2CAP_EVENT_CAN_SEND_NOW`. Chained pbufs are flattened via `pbuf_clone()` exactly once before entering the queue.
+If the Bluetooth radio is temporarily busy, outgoing packets are held in an internal TX queue (ring buffer of already-encapsulated BNEP frames) and drained automatically when the radio signals readiness via `HAL_L2CAP_EVENT_CAN_SEND_NOW`.
 
 The core loop is a single-threaded polling pump driven by `tinypan_process()`. For power-sensitive applications, `tinypan_get_next_timeout_ms()` returns the exact number of milliseconds until the next scheduled event (state machine timeout or lwIP timer), allowing the MCU to enter WFI instead of polling.
 
@@ -82,7 +82,7 @@ The suite includes:
 
 - **Single-threaded.** All calls to TinyPAN functions and the HAL receive callback must run in the same execution context. There is no internal synchronization. If your Bluetooth stack delivers L2CAP callbacks from a hardware ISR or high-priority RTOS task (e.g., ESP-IDF Bluedroid, Zephyr, NimBLE), you must bounce these events through an OS message queue and process them in the same context as `tinypan_process()`. Calling TinyPAN or lwIP functions directly from an ISR will corrupt internal queues and state.
 
-- **TX path flattens chained pbufs.** If lwIP produces a chained (non-contiguous) pbuf, the netif layer clones it into a single contiguous `PBUF_RAM` block via `pbuf_clone()` before sending. This clone happens at most once per packet; if the radio is busy, the already-flattened clone is queued directly. Single-segment pbufs (the common case for DHCP and small packets) are sent without any copy.
+- **TX path clones every outgoing pbuf.** The netif layer unconditionally clones every outgoing pbuf via `pbuf_alloc(PBUF_LINK, ...) + pbuf_copy()` to physically detach it from lwIP's internal bookkeeping before modifying it. This is necessary because lwIP's `etharp_output` mutates the pbuf's payload pointer immediately after `linkoutput` returns. The clone also flattens any chained pbufs into a single contiguous block.
 
 - **TX queue is bounded.** The internal TX queue holds up to `TINYPAN_TX_QUEUE_LEN` (default 8) packets. If the queue is full, the packet is dropped and `ERR_MEM` is returned to lwIP.
 

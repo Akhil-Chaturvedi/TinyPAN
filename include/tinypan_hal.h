@@ -112,8 +112,7 @@ void hal_bt_l2cap_disconnect(void);
  * @brief Send data over the L2CAP channel
  * 
  * Sends a single contiguous buffer over the L2CAP channel.
- * The buffer contains the BNEP header followed by the IP payload,
- * written contiguously via PBUF_LINK_ENCAPSULATION_HLEN headroom.
+ * The buffer contains the BNEP header followed by the IP payload.
  * 
  * @param data         Pointer to the BNEP frame (header + payload)
  * @param len          Total length of the frame

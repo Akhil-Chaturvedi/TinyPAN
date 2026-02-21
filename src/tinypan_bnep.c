@@ -462,63 +462,29 @@ int bnep_send_setup_response(uint16_t response_code) {
     return 0;
 }
 
-int bnep_send_ethernet_frame(const uint8_t* dst_addr,
-                              const uint8_t* src_addr,
-                              uint16_t ethertype,
-                              uint8_t* payload,
-                              uint16_t payload_len) {
-    if (s_state != BNEP_STATE_CONNECTED) {
-        TINYPAN_LOG_WARN("Cannot send frame: not connected (state=%d)", s_state);
-        return -1;
-    }
-    
-    if (!hal_bt_l2cap_can_send()) {
-        TINYPAN_LOG_DEBUG("Cannot send now, L2CAP busy");
-        return 1;  /* Busy, try again */
-    }
-    
-    int header_len;
-    
-    /* The caller (tinypan_lwip_netif) guarantees at least 15 bytes of
-       headroom before the payload pointer (via PBUF_LINK_ENCAPSULATION_HLEN).
-       We back up the pointer, write the BNEP header, and send as one
-       contiguous block through the HAL. */
-    
+uint8_t bnep_get_ethernet_header_len(const uint8_t* dst_addr, const uint8_t* src_addr) {
 #if TINYPAN_ENABLE_COMPRESSION
-    /* Check if we can use compression */
     bool can_compress_dst = (memcmp(dst_addr, s_remote_addr, BNEP_ETHER_ADDR_LEN) == 0);
     bool can_compress_src = (memcmp(src_addr, s_local_addr, BNEP_ETHER_ADDR_LEN) == 0);
     
     if (can_compress_dst && can_compress_src) {
-        /* Fully compressed */
-        header_len = 3;
-        payload -= header_len;
-        bnep_build_compressed_ethernet(payload, header_len, ethertype, NULL, 0);
-    } else {
-        /* General Ethernet (no compression) */
-        header_len = 15;
-        payload -= header_len;
-        bnep_build_general_ethernet(payload, header_len, dst_addr, src_addr, ethertype, NULL, 0);
+        return 3;
     }
 #else
-    /* Always use general Ethernet */
-    header_len = 15;
-    payload -= header_len;
-    bnep_build_general_ethernet(payload, header_len, dst_addr, src_addr, ethertype, NULL, 0);
+    (void)dst_addr;
+    (void)src_addr;
 #endif
-    
-    int result = hal_bt_l2cap_send(payload, header_len + payload_len);
-    if (result > 0) {
-        /* Busy */
-        hal_bt_l2cap_request_can_send_now();
-        return 1;
+    return 15;
+}
+
+void bnep_write_ethernet_header(uint8_t* buffer, uint8_t header_len,
+                                const uint8_t* dst_addr, const uint8_t* src_addr,
+                                uint16_t ethertype) {
+    if (header_len == 3) {
+        bnep_build_compressed_ethernet(buffer, header_len, ethertype, NULL, 0);
+    } else {
+        bnep_build_general_ethernet(buffer, header_len, dst_addr, src_addr, ethertype, NULL, 0);
     }
-    if (result < 0) {
-        TINYPAN_LOG_ERROR("Failed to send Ethernet frame: %d", result);
-        return result;
-    }
-    
-    return 0;
 }
 
 /* ============================================================================

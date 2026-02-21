@@ -215,20 +215,28 @@ int bnep_send_setup_request(void);
 int bnep_send_setup_response(uint16_t response_code);
 
 /**
- * @brief Send an Ethernet frame over BNEP
+ * @brief Get the BNEP header length for an Ethernet frame
+ * 
+ * Determines whether compression can be applied based on the addresses.
  * 
  * @param dst_addr      Destination MAC address (6 bytes)
  * @param src_addr      Source MAC address (6 bytes)
- * @param ethertype     EtherType (e.g., 0x0800 for IPv4)
- * @param payload       Pointer to IP payload (must have at least 15 bytes of headroom allocated before it)
- * @param payload_len   Length of IP payload
- * @return 0 on success, negative error code on failure, positive if busy
+ * @return Length of the BNEP header (15 or 3 bytes)
  */
-int bnep_send_ethernet_frame(const uint8_t* dst_addr,
-                              const uint8_t* src_addr,
-                              uint16_t ethertype,
-                              uint8_t* payload,
-                              uint16_t payload_len);
+uint8_t bnep_get_ethernet_header_len(const uint8_t* dst_addr, const uint8_t* src_addr);
+
+/**
+ * @brief Write the BNEP header into an existing buffer
+ * 
+ * @param buffer        Pointer to write the header
+ * @param header_len    Header length returned by bnep_get_ethernet_header_len
+ * @param dst_addr      Destination MAC address
+ * @param src_addr      Source MAC address
+ * @param ethertype     EtherType (e.g., 0x0800 for IPv4)
+ */
+void bnep_write_ethernet_header(uint8_t* buffer, uint8_t header_len,
+                                const uint8_t* dst_addr, const uint8_t* src_addr,
+                                uint16_t ethertype);
 
 /* ----------------------------------------------------------------------------
  * BNEP Packet Receiving (called by HAL)
