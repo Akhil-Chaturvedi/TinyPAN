@@ -165,6 +165,17 @@ void tinypan_stop(void);
 void tinypan_process(void);
 
 /**
+ * @brief Get milliseconds until next timer event
+ * 
+ * Used by bare-metal (NO_SYS) or RTOS implementations to know exactly
+ * how long the CPU can sleep (WFI/WFE) before `tinypan_process()` needs
+ * to be called again. Prevents 100% active-CPU polling.
+ * 
+ * @return Milliseconds to sleep, or 0xFFFFFFFF for infinite
+ */
+uint32_t tinypan_get_next_timeout_ms(void);
+
+/**
  * @brief Get current connection state
  * 
  * @return Current state

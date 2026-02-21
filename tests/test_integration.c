@@ -204,8 +204,8 @@ int main(void) {
                     dhcp_offer, (uint16_t)offer_len
                 );
                 
-                extern void tinypan_netif_input(const uint8_t* data, uint16_t len);
-                tinypan_netif_input(full_packet + 1, pkt_len - 1);
+                extern void tinypan_netif_input(const uint8_t* dst, const uint8_t* src, uint16_t ethertype, const uint8_t* payload, uint16_t payload_len);
+                tinypan_netif_input(full_packet + 1, full_packet + 7, ((uint16_t)full_packet[13] << 8) | full_packet[14], full_packet + 15, pkt_len - 15);
                 offer_sent = true;
                 
                 printf("[Step 5c] Injected OFFER Packet Hex (%d bytes):\n", pkt_len);
@@ -237,8 +237,8 @@ int main(void) {
                     dhcp_ack, (uint16_t)ack_len
                 );
                 
-                extern void tinypan_netif_input(const uint8_t* data, uint16_t len);
-                tinypan_netif_input(full_packet + 1, pkt_len - 1);
+                extern void tinypan_netif_input(const uint8_t* dst, const uint8_t* src, uint16_t ethertype, const uint8_t* payload, uint16_t payload_len);
+                tinypan_netif_input(full_packet + 1, full_packet + 7, ((uint16_t)full_packet[13] << 8) | full_packet[14], full_packet + 15, pkt_len - 15);
                 ack_sent = true;
                 
                 /* Fast-forward to let lwIP process ACK and setup IP */

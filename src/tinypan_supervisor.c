@@ -218,11 +218,11 @@ void supervisor_process(void) {
             break;
             
         case TINYPAN_STATE_ONLINE:
-            /* TODO: Heartbeat monitoring */
+            /* Not implemented: heartbeat / keepalive monitoring */
             break;
             
         case TINYPAN_STATE_STALLED:
-            /* TODO: Link recovery */
+            /* Not implemented: link recovery logic */
             break;
             
         case TINYPAN_STATE_RECONNECTING:
@@ -322,7 +322,10 @@ void supervisor_on_l2cap_event(int event, int status) {
             break;
             
         case HAL_L2CAP_EVENT_CAN_SEND_NOW:
-            /* Pass through, nothing to do here */
+            TINYPAN_LOG_DEBUG("L2CAP can send now (flushing queues)");
+#if TINYPAN_ENABLE_LWIP
+            tinypan_netif_drain_tx_queue();
+#endif
             break;
             
         default:
@@ -359,7 +362,7 @@ void supervisor_on_bnep_setup_response(uint16_t response_code) {
             schedule_reconnect();
         }
 #else
-        /* TODO: Start DHCP */
+        /* No lwIP: DHCP must be handled externally */
 #endif
     } else {
         TINYPAN_LOG_ERROR("BNEP setup rejected: 0x%04X", response_code);
@@ -388,7 +391,7 @@ void supervisor_on_ip_lost(void) {
             TINYPAN_LOG_WARN("Failed to restart DHCP");
         }
 #else
-        /* TODO: Restart DHCP */
+        /* No lwIP: DHCP restart must be handled externally */
 #endif
     }
 }

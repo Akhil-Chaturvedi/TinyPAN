@@ -36,33 +36,15 @@ if(TINYPAN_ENABLE_LWIP)
     FetchContent_MakeAvailable(lwip)
 
     # Define minimal lwIP library
+    # Load lwIP's official source lists to avoid brittle hardcoding
+    set(LWIP_DIR ${lwip_SOURCE_DIR})
+    include(${lwip_SOURCE_DIR}/src/Filelists.cmake)
+    
+    # Assemble required lwIP files
     set(LWIP_SOURCES
-        ${lwip_SOURCE_DIR}/src/core/init.c
-        ${lwip_SOURCE_DIR}/src/core/def.c
-        ${lwip_SOURCE_DIR}/src/core/dns.c
-        ${lwip_SOURCE_DIR}/src/core/inet_chksum.c
-        ${lwip_SOURCE_DIR}/src/core/ip.c
-        ${lwip_SOURCE_DIR}/src/core/mem.c
-        ${lwip_SOURCE_DIR}/src/core/memp.c
-        ${lwip_SOURCE_DIR}/src/core/netif.c
-        ${lwip_SOURCE_DIR}/src/core/pbuf.c
-        ${lwip_SOURCE_DIR}/src/core/raw.c
-        ${lwip_SOURCE_DIR}/src/core/stats.c
-        ${lwip_SOURCE_DIR}/src/core/sys.c
-        ${lwip_SOURCE_DIR}/src/core/tcp.c
-        ${lwip_SOURCE_DIR}/src/core/tcp_in.c
-        ${lwip_SOURCE_DIR}/src/core/tcp_out.c
-        ${lwip_SOURCE_DIR}/src/core/timeouts.c
-        ${lwip_SOURCE_DIR}/src/core/udp.c
-        ${lwip_SOURCE_DIR}/src/core/ipv4/autoip.c
-        ${lwip_SOURCE_DIR}/src/core/ipv4/dhcp.c
-        ${lwip_SOURCE_DIR}/src/core/ipv4/etharp.c
-        ${lwip_SOURCE_DIR}/src/core/ipv4/icmp.c
-        ${lwip_SOURCE_DIR}/src/core/ipv4/igmp.c
-        ${lwip_SOURCE_DIR}/src/core/ipv4/ip4.c
-        ${lwip_SOURCE_DIR}/src/core/ipv4/ip4_addr.c
-        ${lwip_SOURCE_DIR}/src/core/ipv4/ip4_frag.c
-        ${lwip_SOURCE_DIR}/src/netif/ethernet.c
+        ${lwipcore_SRCS}
+        ${lwipcore4_SRCS}
+        ${lwipnetif_SRCS}
     )
     add_library(lwip_lib STATIC ${LWIP_SOURCES})
     target_include_directories(lwip_lib PUBLIC

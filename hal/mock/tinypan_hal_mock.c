@@ -186,7 +186,8 @@ void hal_bt_l2cap_disconnect(void) {
     s_connected = false;
 }
 
-int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
+int hal_bt_l2cap_send_sg(const uint8_t* header, uint16_t header_len, 
+                         const uint8_t* payload, uint16_t payload_len) {
     if (!s_initialized) {
         return -1;
     }
@@ -201,22 +202,28 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
         return 1;  /* Busy */
     }
     
-    TINYPAN_LOG_DEBUG("[MOCK] Sending %u bytes:", len);
+    uint16_t total_len = header_len + payload_len;
+    TINYPAN_LOG_DEBUG("[MOCK] Sending %u bytes (sg):", total_len);
+    
+    if (total_len <= sizeof(s_last_tx_data)) {
+        if (header != NULL && header_len > 0) {
+            memcpy(s_last_tx_data, header, header_len);
+        }
+        if (payload != NULL && payload_len > 0) {
+            memcpy(s_last_tx_data + header_len, payload, payload_len);
+        }
+        s_last_tx_len = total_len;
+    }
     
     /* Print hex dump for debugging */
     #if TINYPAN_ENABLE_DEBUG
-    char hex_buf[128];
+    char hex_buf[256];
     int pos = 0;
-    for (uint16_t i = 0; i < len && pos < 120; i++) {
-        pos += snprintf(hex_buf + pos, sizeof(hex_buf) - pos, "%02X ", data[i]);
+    for (uint16_t i = 0; i < total_len && pos < 240; i++) {
+        pos += snprintf(hex_buf + pos, sizeof(hex_buf) - pos, "%02X ", s_last_tx_data[i]);
     }
     TINYPAN_LOG_DEBUG("[MOCK] TX: %s", hex_buf);
     #endif
-    
-    if (len <= sizeof(s_last_tx_data)) {
-        memcpy(s_last_tx_data, data, len);
-        s_last_tx_len = len;
-    }
     
     return 0;
 }

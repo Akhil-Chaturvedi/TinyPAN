@@ -8,10 +8,12 @@
 #include "../include/tinypan_hal.h"
 #include "tinypan_bnep.h"
 #include "tinypan_supervisor.h"
+#include "tinypan_internal.h"
 #include <string.h>
 
 #if TINYPAN_ENABLE_LWIP
 #include "tinypan_lwip_netif.h"
+#include "lwip/timeouts.h"
 #endif
 
 /* ============================================================================
@@ -57,7 +59,7 @@ static void bnep_setup_response_callback(uint16_t response_code, void* user_data
 }
 
 /**
- * @brief BNEP frame receive callback - passes to lwIP (TODO)
+ * @brief BNEP frame receive callback - routes frames into lwIP
  */
 static void bnep_frame_callback(const bnep_ethernet_frame_t* frame, void* user_data) {
     (void)user_data;
@@ -75,7 +77,7 @@ static void bnep_frame_callback(const bnep_ethernet_frame_t* frame, void* user_d
     tinypan_netif_input(frame->dst_addr, frame->src_addr, frame->ethertype,
                         frame->payload, frame->payload_len);
 #else
-    /* TODO: Pass to lwIP netif */
+    /* No lwIP: frame is received but has nowhere to go */
 #endif
 }
 
@@ -229,6 +231,34 @@ void tinypan_process(void) {
 #if TINYPAN_ENABLE_LWIP
     tinypan_netif_process();
 #endif
+}
+
+uint32_t tinypan_get_next_timeout_ms(void) {
+    if (!s_initialized) {
+        return 0xFFFFFFFF; /* Infinite sleep, library not active */
+    }
+    
+    uint32_t sleep_ms = 0xFFFFFFFF;
+    
+#if TINYPAN_ENABLE_LWIP
+    /* Get lwIP's internal timer resolution (DHCP renew, TCP ACKs, etc.) */
+    uint32_t lwip_sleep = sys_timeouts_sleeptime();
+    if (lwip_sleep < sleep_ms) {
+        sleep_ms = lwip_sleep;
+    }
+#endif
+
+    /* TinyPAN has its own internal state machine timeouts.
+       If we're actively connecting or running the BNEP handshake, clamp sleep
+       to 50ms to ensure we don't miss Supervisor-level timeout transitions. */
+    tinypan_state_t state = supervisor_get_state();
+    if (state != TINYPAN_STATE_IDLE && state != TINYPAN_STATE_ONLINE && state != TINYPAN_STATE_ERROR) {
+        if (sleep_ms > 50) {
+            sleep_ms = 50;
+        }
+    }
+
+    return sleep_ms;
 }
 
 tinypan_state_t tinypan_get_state(void) {

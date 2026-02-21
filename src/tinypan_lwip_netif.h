@@ -116,6 +116,13 @@ uint32_t tinypan_netif_get_netmask(void);
  */
 void tinypan_netif_process(void);
 
+/**
+ * @brief Drain the transmission queue
+ * 
+ * Should be called when the hardware signals HAL_L2CAP_EVENT_CAN_SEND_NOW
+ */
+void tinypan_netif_drain_tx_queue(void);
+
 #ifdef __cplusplus
 }
 #endif

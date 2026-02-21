@@ -108,13 +108,21 @@ int hal_bt_l2cap_connect(const uint8_t remote_addr[HAL_BD_ADDR_LEN], uint16_t ps
 void hal_bt_l2cap_disconnect(void);
 
 /**
- * @brief Send data over the L2CAP channel
+ * @brief Send data over the L2CAP channel using scatter-gather
  * 
- * @param data  Pointer to data to send
- * @param len   Length of data to send
+ * To avoid allocating 1500-byte temporary static buffers for prepend operations,
+ * the HAL uses a scatter-gather approach. The underlying Bluetooth driver should
+ * send the header immediately followed by the payload, or copy them both directly
+ * into the hardware Tx FIFO.
+ * 
+ * @param header       Pointer to the BNEP header
+ * @param header_len   Length of the BNEP header
+ * @param payload      Pointer to the IP payload (can be NULL if unsupported)
+ * @param payload_len  Length of the IP payload
  * @return 0 on success, negative error code on failure, positive if busy (try again)
  */
-int hal_bt_l2cap_send(const uint8_t* data, uint16_t len);
+int hal_bt_l2cap_send_sg(const uint8_t* header, uint16_t header_len, 
+                         const uint8_t* payload, uint16_t payload_len);
 
 /**
  * @brief Check if the L2CAP channel is ready to send data

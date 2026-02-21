@@ -9,6 +9,7 @@
 #include "tinypan_bnep.h"
 #include "../include/tinypan_config.h"
 #include "../include/tinypan_hal.h"
+#include "tinypan_internal.h"
 
 /* lwIP includes */
 #include "lwip/opt.h"
@@ -50,11 +51,17 @@ static bool s_initialized = false;
 /** Local MAC address (derived from Bluetooth address) */
 static uint8_t s_mac_addr[6] = {0};
 
+/* TX Queue State for handling L2CAP Busy (`ERR_WOULDBLOCK`) */
+#define TINYPAN_TX_QUEUE_LEN 8
+static struct pbuf* s_tx_queue[TINYPAN_TX_QUEUE_LEN] = {0};
+static uint8_t s_tx_queue_head = 0;
+static uint8_t s_tx_queue_tail = 0;
+
 /* ============================================================================
  * Forward Declarations
  * ============================================================================ */
 
-static err_t tinypan_netif_output(struct netif* netif, struct pbuf* p);
+
 static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p);
 static void tinypan_netif_status_callback(struct netif* netif);
 
@@ -112,6 +119,59 @@ static err_t tinypan_netif_init_callback(struct netif* netif) {
  * @param p     Pbuf chain containing the Ethernet frame
  * @return ERR_OK on success, error code otherwise
  */
+/**
+ * @brief Helper to attempt sending a single pbuf immediately
+ */
+static err_t do_send_pbuf(struct pbuf* p) {
+    /* Extract Ethernet header */
+    uint8_t* data = (uint8_t*)p->payload;
+    uint8_t* dst_addr = &data[0];
+    uint8_t* src_addr = &data[6];
+    uint16_t ethertype = ((uint16_t)data[12] << 8) | data[13];
+    uint8_t* payload = &data[14];
+    uint16_t payload_len = (uint16_t)(p->tot_len - 14);
+    
+    struct pbuf* q = NULL;
+    
+    /* Handle chained pbufs by copying to a contiguous pbuf using lwIP's
+       thread-safe memory allocator instead of a static reentrancy-trap buffer. */
+    if (p->next != NULL) {
+        /* PBUF_RAM ensures it's contiguous */
+        q = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
+        if (q == NULL) {
+            TINYPAN_LOG_WARN("netif: Failed to clone pbuf");
+            return ERR_MEM;
+        }
+        
+        /* Re-point to the cloned contiguous memory */
+        uint8_t* q_data = (uint8_t*)q->payload;
+        dst_addr = &q_data[0];
+        src_addr = &q_data[6];
+        ethertype = ((uint16_t)q_data[12] << 8) | q_data[13];
+        payload = &q_data[14];
+    }
+    
+    /* Send via BNEP */
+    int result = bnep_send_ethernet_frame(dst_addr, src_addr, ethertype,
+                                           payload, payload_len);
+                                           
+    if (q != NULL) {
+        pbuf_free(q);
+    }
+    
+    if (result < 0) {
+        TINYPAN_LOG_WARN("netif: BNEP send failed: %d", result);
+        return ERR_IF;
+    }
+    
+    if (result > 0) {
+        /* Busy */
+        return ERR_WOULDBLOCK;
+    }
+    
+    return ERR_OK;
+}
+
 static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p) {
     (void)netif;
     
@@ -125,68 +185,36 @@ static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p) {
         return ERR_CONN;
     }
     
-    /* The pbuf contains a full Ethernet frame:
-     * - Destination MAC (6 bytes)
-     * - Source MAC (6 bytes)
-     * - EtherType (2 bytes)
-     * - Payload (variable)
-     */
-    
     if (p->tot_len < 14) {
         TINYPAN_LOG_WARN("netif: Frame too short: %u", p->tot_len);
         return ERR_ARG;
     }
     
-    /* Extract Ethernet header */
-    uint8_t* data = (uint8_t*)p->payload;
-    uint8_t* dst_addr = &data[0];
-    uint8_t* src_addr = &data[6];
-    uint16_t ethertype = ((uint16_t)data[12] << 8) | data[13];
-    
-    /* Payload starts after 14-byte Ethernet header */
-    uint8_t* payload = &data[14];
-    uint16_t payload_len = (uint16_t)(p->tot_len - 14);
-    
-    TINYPAN_LOG_DEBUG("netif TX: dst=%02X:%02X:%02X:%02X:%02X:%02X type=0x%04X len=%u",
-                       dst_addr[0], dst_addr[1], dst_addr[2],
-                       dst_addr[3], dst_addr[4], dst_addr[5],
-                       ethertype, payload_len);
-    
-    /* Handle chained pbufs by copying to contiguous buffer if needed */
-    if (p->next != NULL) {
-        /* Chained pbuf - need to flatten */
-        static uint8_t tx_buf[TINYPAN_MAX_FRAME_SIZE];
-        
-        if (p->tot_len > sizeof(tx_buf) - 14) {
-            TINYPAN_LOG_WARN("netif: Frame too large for buffer");
-            return ERR_MEM;
+    /* If the queue is empty, attempt immediate dispatch */
+    bool queue_was_empty = (s_tx_queue_head == s_tx_queue_tail);
+    if (queue_was_empty) {
+        err_t err = do_send_pbuf(p);
+        if (err != ERR_WOULDBLOCK) {
+            return err; /* Successfully sent or fatal error */
         }
-        
-        /* Copy all pbuf segments */
-        uint16_t offset = 0;
-        for (struct pbuf* q = p; q != NULL; q = q->next) {
-            memcpy(&tx_buf[offset], q->payload, q->len);
-            offset += q->len;
-        }
-        
-        /* Now send from contiguous buffer */
-        payload = &tx_buf[14];
     }
     
-    /* Send via BNEP */
-    int result = bnep_send_ethernet_frame(dst_addr, src_addr, ethertype,
-                                           payload, payload_len);
-    
-    if (result < 0) {
-        TINYPAN_LOG_WARN("netif: BNEP send failed: %d", result);
-        return ERR_IF;
+    /* If we get here, either the queue wasn't empty (we must queue to maintain order),
+       or we just got ERR_WOULDBLOCK trying to send the packet. */
+       
+    uint8_t next_tail = (s_tx_queue_tail + 1) % TINYPAN_TX_QUEUE_LEN;
+    if (next_tail == s_tx_queue_head) {
+        TINYPAN_LOG_WARN("netif: TX queue full, dropping packet");
+        return ERR_MEM;
     }
     
-    if (result > 0) {
-        /* Busy - try again later */
-        return ERR_WOULDBLOCK;
-    }
+    TINYPAN_LOG_DEBUG("netif: L2CAP busy, queueing pbuf (len=%u)", p->tot_len);
     
+    pbuf_ref(p);
+    s_tx_queue[s_tx_queue_tail] = p;
+    s_tx_queue_tail = next_tail;
+    
+    /* Return ERR_OK to lwIP so it doesn't drop the packet from its internal layers */
     return ERR_OK;
 }
 
@@ -216,8 +244,6 @@ static void tinypan_netif_status_callback(struct netif* netif) {
                              ip4_addr3(mask), ip4_addr4(mask));
             
             /* Notify the main TinyPAN module */
-            extern void tinypan_internal_set_ip(uint32_t ip, uint32_t netmask, 
-                                                 uint32_t gw, uint32_t dns);
             tinypan_internal_set_ip(ip->addr, mask->addr, gw->addr, 0);
         }
     }
@@ -416,8 +442,28 @@ void tinypan_netif_process(void) {
         return;
     }
     
-    /* Process lwIP timeouts */
+    /* Process lwIP timers */
     sys_check_timeouts();
+}
+
+void tinypan_netif_drain_tx_queue(void) {
+    if (!s_initialized) {
+        return;
+    }
+    
+    while (s_tx_queue_head != s_tx_queue_tail) {
+        struct pbuf* p = s_tx_queue[s_tx_queue_head];
+        
+        err_t err = do_send_pbuf(p);
+        if (err == ERR_WOULDBLOCK) {
+            /* Still blocked - stop draining and leave at head */
+            break;
+        }
+        
+        /* Successfully sent (or fatal error) - pop from queue */
+        s_tx_queue_head = (s_tx_queue_head + 1) % TINYPAN_TX_QUEUE_LEN;
+        pbuf_free(p); /* Release the ref we took when queueing */
+    }
 }
 
 /* ============================================================================

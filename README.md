@@ -1,90 +1,91 @@
 # TinyPAN
 
-TinyPAN is an ultra-lightweight, zero-allocation C library providing a Bluetooth Personal Area Network (PAN) client. It bridges Bluetooth L2CAP/BNEP data into the lwIP network stack, enabling background IP connectivity for embedded microcontrollers.
+TinyPAN is a lightweight C library that implements a Bluetooth PAN (Personal Area Network) client. It connects an embedded device to a phone's Bluetooth tethering, bridging BNEP frames into the lwIP TCP/IP stack so the device can obtain an IP address via DHCP and communicate over IP.
 
-## Architecture and Footprint
+## Architecture
 
-The library is designed specifically for constrained embedded environments (e.g., ESP32, nRF52) and avoids dynamic memory allocation entirely. Packets are zero-copied from the hardware abstraction layer (HAL) directly into the lwIP stack.
+The library targets constrained embedded platforms (ESP32, nRF52, etc.) and avoids heap allocation. The TX path uses a scatter-gather HAL API to avoid large intermediate copy buffers — the BNEP layer builds a small header on the stack and passes it alongside the original IP payload pointer directly to the hardware driver.
 
-Performance and size metrics (compiled via GCC for x86_64, size budgets enforced in CI):
-* **RAM (bss + data):** 192 bytes
+If the Bluetooth radio is temporarily busy, outgoing packets are held in an internal TX queue (ring buffer of pbuf references) and drained automatically when the radio signals readiness via `HAL_L2CAP_EVENT_CAN_SEND_NOW`.
+
+The core loop is a single-threaded polling pump driven by `tinypan_process()`. For power-sensitive applications, `tinypan_get_next_timeout_ms()` returns the number of milliseconds until the next scheduled event, allowing the MCU to sleep (WFI) instead of polling continuously.
+
+Compiled size metrics (GCC, x86_64):
+* **RAM (bss + data):** ~192 bytes
 * **Flash (text):** ~14.5 KB
-* **Heap Allocation:** 0 bytes (No malloc/free used)
-
-The core architecture is an RTOS-friendly polling pump. The background idle state consumes near-zero CPU cycles, driven by a periodic `tinypan_process()` tick to handle lwIP timeouts, and waking instantly on incoming L2CAP payload interrupts.
+* **Heap allocation:** None
 
 ## Repository Layout
 
 ```text
 TinyPAN/
-├── CMakeLists.txt         # Primary build configuration (Fetches lwIP automatically)
+├── CMakeLists.txt         # Build configuration (fetches lwIP via FetchContent)
 ├── include/
-│   ├── tinypan.h          # Main library API
-│   ├── tinypan_config.h   # Timing and retry configurations
+│   ├── tinypan.h          # Public API
+│   ├── tinypan_config.h   # Timing and retry parameters
 │   ├── tinypan_hal.h      # Hardware Abstraction Layer interface
-│   ├── lwipopts.h         # Project-specific lwIP configuration
-│   └── arch/              # lwIP architecture shims
+│   ├── lwipopts.h         # lwIP configuration overrides
+│   └── arch/              # lwIP architecture port (cc.h)
 ├── src/
-│   ├── tinypan.c          # Core initialization and event routing
-│   ├── tinypan_bnep.c     # BNEP protocol encapsulation/decapsulation
-│   ├── tinypan_supervisor.c # Connection state machine (IDLE -> CONNECTING -> DHCP -> ONLINE)
-│   └── tinypan_lwip_netif.c # lwIP Network Interface (netif) bridge driver
+│   ├── tinypan.c          # Initialization, event routing, timeout bridge
+│   ├── tinypan_bnep.c     # BNEP protocol: frame building, parsing, state machine
+│   ├── tinypan_supervisor.c # Connection supervisor (IDLE -> CONNECTING -> DHCP -> ONLINE)
+│   ├── tinypan_lwip_netif.c # lwIP network interface driver (TX queue, pbuf handling)
+│   └── tinypan_internal.h # Internal cross-module prototypes
 ├── tests/
 │   ├── test_bnep.c        # BNEP parser/builder unit tests
-│   ├── test_supervisor.c  # State machine and timeout simulation tests
-│   ├── test_integration.c # Full lwIP DHCP DORA integration test over Mock HAL
-│   └── dhcp_sim.c         # DHCP packet simulation helpers
+│   ├── test_supervisor.c  # State machine and timeout tests
+│   ├── test_integration.c # Full DHCP DORA flow over mock HAL
+│   └── dhcp_sim.c/.h      # DHCP packet builder/parser for test simulation
 └── hal/
-    └── mock/              # Pure C simulation HAL used for validation
+    └── mock/              # Mock HAL for simulation-based testing
 ```
 
-## Integration and Usage
+## Porting to Hardware
 
-To use TinyPAN on target hardware, the host application must provide implementations for the three functions defined in `tinypan_hal.h`:
+To run TinyPAN on real hardware, implement the functions declared in `tinypan_hal.h`:
 
-1. `hal_get_tick_ms()`: Provide a monotonically increasing millisecond tick (e.g., FreeRTOS `xTaskGetTickCount() * portTICK_PERIOD_MS`).
-2. `hal_bt_l2cap_send(data, len)`: Route the byte array to the native Bluetooth stack for transmission over the L2CAP PSM assigned to BNEP.
-3. `tinypan_input(data, len)`: Call this from your Bluetooth stack's RX interrupt when an L2CAP packet is received.
+1. **`hal_get_tick_ms()`** — Return a monotonic millisecond counter (e.g., `xTaskGetTickCount() * portTICK_PERIOD_MS` on FreeRTOS).
+2. **`hal_bt_l2cap_send_sg(header, header_len, payload, payload_len)`** — Transmit the header and payload buffers over the L2CAP channel assigned to BNEP (PSM 0x000F). The two buffers must be sent as a single contiguous L2CAP frame.
+3. **`hal_bt_l2cap_can_send()`** — Return whether the L2CAP channel can accept a new frame.
+4. **`hal_bt_l2cap_request_can_send_now()`** — Request a `HAL_L2CAP_EVENT_CAN_SEND_NOW` callback when the channel becomes writable.
+5. **Receive path** — When the Bluetooth stack receives L2CAP data on the BNEP PSM, call the registered receive callback (see `hal_bt_l2cap_register_recv_callback`).
 
-## Build and Validation
+See `hal/mock/` for a reference implementation.
 
-The project is built and validated purely in simulation using a Mock HAL. This mathematically verifies the BNEP framing, state machine transitions, and lwIP DHCP bridge without requiring physical Bluetooth hardware.
+## Building
 
-### Prerequisites
-* CMake (>= 3.12)
-* GCC / MinGW / Clang (C99 compliant)
-* Ninja or Make
+Requires CMake (>= 3.12), a C99 compiler (GCC, Clang, or MSVC), and Ninja or Make.
 
-### Building
-
-The CMake configuration automatically uses `FetchContent` to download the lwIP network stack (STABLE-2_1_3_RELEASE) and binds it to the TinyPAN library.
+The CMake configuration uses `FetchContent` to download lwIP (STABLE-2_1_3_RELEASE) and compiles it alongside TinyPAN. The lwIP source list is loaded from lwIP's own `Filelists.cmake` to avoid maintaining a hardcoded file list.
 
 ```bash
 cmake -S . -B build
 cmake --build build
 ```
 
-### Running the Test Suite
+## Testing
 
-The CTest suite validates the BNEP headers, the supervisor state machine reconnect logic, the complete IP acquisition flow via lwIP, and guarantees the static size constraints remain unbroken.
+The test suite runs entirely in simulation using the mock HAL. No Bluetooth hardware is needed.
 
 ```bash
 ctest --test-dir build -V
 ```
 
-If successful, the `IntegrationFlowTests` will demonstrate lwIP successfully booting up, issuing an automatically generated DHCP DISCOVER packet, handling a simulated mock DHCP OFFER, and verifying the leased IP address via ARP ping.
+The suite includes:
+- **BNEPTests** — Validates BNEP header construction, parsing, and edge cases.
+- **SupervisorTests** — Verifies state machine transitions, timeout handling, and reconnection logic.
+- **IntegrationFlowTests** — Runs a complete DHCP DORA handshake: lwIP generates a real DHCP DISCOVER, the test harness responds with a simulated OFFER, lwIP sends a REQUEST, and the harness confirms with an ACK. The test passes when lwIP reports an assigned IP address.
 
 ## Design Constraints
 
-TinyPAN makes deliberate trade-offs to stay small. Users should be aware of these before integrating:
+- **Single-threaded.** All calls to TinyPAN functions and the HAL receive callback must run in the same execution context. There is no internal synchronization.
 
-* **Single-threaded only.** All calls to `tinypan_process()`, `tinypan_start()`, `tinypan_stop()`, and the HAL receive callback must originate from the same execution context (main loop or a single RTOS task). There is no internal locking. Calling TinyPAN functions from multiple threads or ISRs will corrupt internal state.
+- **TX path copies chained pbufs.** If lwIP produces a chained (non-contiguous) pbuf, `tinypan_lwip_netif` clones it into a single contiguous pbuf using `pbuf_clone()` before extracting the Ethernet header fields. Single-segment pbufs (the common case for DHCP and small packets) are sent without any copy.
 
-* **TX path performs two copies.** Outgoing IP packets are copied once when lwIP flattens chained pbufs, and again when the BNEP layer prepends its header. This costs ~3 KB of static BSS and extra CPU cycles per packet. A future optimization could use lwIP's `PBUF_LINK_ENCAPSULATION_HLEN` to reserve BNEP header space inside the pbuf itself, eliminating one copy entirely.
+- **TX queue is bounded.** The internal TX queue holds up to `TINYPAN_TX_QUEUE_LEN` (default 8) packets. If the queue is full, the packet is dropped and `ERR_BUF` is returned to lwIP. This is unlikely under normal DHCP/ARP traffic but could matter for high-throughput use cases.
 
-* **No transmit queue.** If the Bluetooth L2CAP channel is busy when lwIP tries to send a packet, the packet is dropped with `ERR_WOULDBLOCK`. lwIP's UDP and RAW APIs do not automatically retry. For bursty traffic patterns, the integrator should implement a small ring buffer in the HAL layer or throttle transmission rate at the application level.
-
-* **BNEP filter requests are declined.** When the NAP (phone) sends BNEP Network Protocol Type or Multicast Address filter requests, TinyPAN responds with "Unsupported Request" (`0x0001`). This is spec-compliant and forces the NAP to handle filtering on its own end. Actual filter processing is not implemented.
+- **BNEP filter requests are declined.** When the NAP sends BNEP filter set requests, TinyPAN responds with `0x0001` (Unsupported Request). This is spec-compliant and means the NAP must handle its own filtering.
 
 ## License
 
