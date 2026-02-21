@@ -477,6 +477,8 @@ int bnep_send_ethernet_frame(const uint8_t* dst_addr,
         return 1;  /* Busy, try again */
     }
     
+    int pkt_len;
+    
     /* We use a statically allocated transmission buffer since TinyPAN is strictly
        single-threaded. This completely eliminates the VLA stack-overflow risk. */
     uint16_t total_required = 15 + payload_len; /* Max possible BNEP header is 15 */
@@ -576,9 +578,10 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
             
         case BNEP_CTRL_FILTER_NET_TYPE_SET:
         case BNEP_CTRL_FILTER_MULTI_ADDR_SET:
-            /* NAP is setting filters - respond with success */
-            TINYPAN_LOG_DEBUG("Received filter set request, acknowledging");
-            /* TODO: Actually process filters */
+            /* NAP is setting filters - respond with Unsupported so the NAP
+               knows it must handle filtering on its own end. Falsely claiming
+               Success without actually filtering causes protocol violations. */
+            TINYPAN_LOG_DEBUG("Received filter set request, responding Unsupported");
             {
                 uint8_t resp_type = (control_type == BNEP_CTRL_FILTER_NET_TYPE_SET) ?
                                     BNEP_CTRL_FILTER_NET_TYPE_RESPONSE :
@@ -586,7 +589,7 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
                 uint8_t resp[4] = {
                     BNEP_PKT_TYPE_CONTROL,
                     resp_type,
-                    0x00, 0x00  /* Success */
+                    0x00, 0x01  /* Unsupported Request */
                 };
                 hal_bt_l2cap_send(resp, sizeof(resp));
             }

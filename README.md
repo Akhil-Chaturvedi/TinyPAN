@@ -74,6 +74,18 @@ ctest --test-dir build -V
 
 If successful, the `IntegrationFlowTests` will demonstrate lwIP successfully booting up, issuing an automatically generated DHCP DISCOVER packet, handling a simulated mock DHCP OFFER, and verifying the leased IP address via ARP ping.
 
+## Design Constraints
+
+TinyPAN makes deliberate trade-offs to stay small. Users should be aware of these before integrating:
+
+* **Single-threaded only.** All calls to `tinypan_process()`, `tinypan_start()`, `tinypan_stop()`, and the HAL receive callback must originate from the same execution context (main loop or a single RTOS task). There is no internal locking. Calling TinyPAN functions from multiple threads or ISRs will corrupt internal state.
+
+* **TX path performs two copies.** Outgoing IP packets are copied once when lwIP flattens chained pbufs, and again when the BNEP layer prepends its header. This costs ~3 KB of static BSS and extra CPU cycles per packet. A future optimization could use lwIP's `PBUF_LINK_ENCAPSULATION_HLEN` to reserve BNEP header space inside the pbuf itself, eliminating one copy entirely.
+
+* **No transmit queue.** If the Bluetooth L2CAP channel is busy when lwIP tries to send a packet, the packet is dropped with `ERR_WOULDBLOCK`. lwIP's UDP and RAW APIs do not automatically retry. For bursty traffic patterns, the integrator should implement a small ring buffer in the HAL layer or throttle transmission rate at the application level.
+
+* **BNEP filter requests are declined.** When the NAP (phone) sends BNEP Network Protocol Type or Multicast Address filter requests, TinyPAN responds with "Unsupported Request" (`0x0001`). This is spec-compliant and forces the NAP to handle filtering on its own end. Actual filter processing is not implemented.
+
 ## License
 
 MIT License.
