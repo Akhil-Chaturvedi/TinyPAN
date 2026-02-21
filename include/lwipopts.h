@@ -19,6 +19,13 @@
 #define LWIP_ETHERNET               1
 #define LWIP_NETIF_STATUS_CALLBACK  1
 
+#include "tinypan_config.h"
+#if TINYPAN_USE_BLE_SLIP
+#define LWIP_HAVE_SLIPIF            1
+#else
+#define LWIP_HAVE_SLIPIF            0
+#endif
+
 /* Disable unused features to save ROM/RAM */
 #define LWIP_IPV6                   0
 #define LWIP_TCP                    0

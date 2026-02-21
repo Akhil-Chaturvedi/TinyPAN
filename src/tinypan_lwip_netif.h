@@ -1,7 +1,7 @@
 /*
  * TinyPAN lwIP Network Interface Adapter - Header
  * 
- * Bridges the BNEP layer to lwIP's netif interface.
+ * Bridges TinyPAN's transport layer (BNEP or SLIP) to lwIP's netif interface.
  */
 
 #ifndef TINYPAN_LWIP_NETIF_H
@@ -20,8 +20,9 @@ struct netif;
 /**
  * @brief Initialize the TinyPAN network interface
  * 
- * This function initializes the lwIP netif that uses BNEP as the underlying
- * transport. It should be called after tinypan_init() and before tinypan_start().
+ * Sets up the lwIP netif. In BNEP mode, this configures an Ethernet-type
+ * interface. In SLIP mode, it initializes a SLIP serial interface.
+ * Should be called after tinypan_init() and before tinypan_start().
  * 
  * @return 0 on success, negative on error
  */
@@ -35,7 +36,8 @@ void tinypan_netif_deinit(void);
 /**
  * @brief Start DHCP on the TinyPAN interface
  * 
- * Called after BNEP connection is established to obtain an IP address.
+ * Called after the transport connection is established (BNEP setup complete,
+ * or SLIP link ready) to obtain an IP address.
  * 
  * @return 0 on success, negative on error
  */
@@ -49,23 +51,26 @@ void tinypan_netif_stop_dhcp(void);
 /**
  * @brief Set the interface link state
  * 
- * Called when BNEP connection state changes.
+ * Called when the underlying transport connection state changes.
  * 
  * @param up true if link is up, false if down
  */
 void tinypan_netif_set_link(bool up);
 
 /**
- * @brief Process incoming Ethernet frame from BNEP
+ * @brief Process incoming data from the transport layer
  * 
- * Called by the BNEP layer when an Ethernet frame is received.
- * Reconstructs the Ethernet header and passes the frame to lwIP.
+ * In BNEP mode: reconstructs the Ethernet header from the parsed BNEP
+ * addresses and passes the frame to lwIP.
+ * In SLIP mode: enqueues raw bytes into the internal RX ring buffer
+ * for lwIP's slipif to consume. The dst_addr, src_addr, and ethertype
+ * parameters are ignored (pass NULL/0).
  * 
- * @param dst_addr   Destination MAC address (6 bytes)
- * @param src_addr   Source MAC address (6 bytes)
- * @param ethertype  EtherType (network byte order)
- * @param payload    Pointer to Ethernet payload
- * @param payload_len Length of Ethernet payload
+ * @param dst_addr   Destination MAC address (6 bytes, or NULL for SLIP mode)
+ * @param src_addr   Source MAC address (6 bytes, or NULL for SLIP mode)
+ * @param ethertype  EtherType (ignored in SLIP mode)
+ * @param payload    Pointer to payload data (Ethernet payload or raw SLIP bytes)
+ * @param payload_len Length of payload
  */
 void tinypan_netif_input(const uint8_t* dst_addr, const uint8_t* src_addr,
                           uint16_t ethertype, const uint8_t* payload,

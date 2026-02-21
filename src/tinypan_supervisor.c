@@ -183,6 +183,11 @@ void supervisor_process(void) {
             break;
             
         case TINYPAN_STATE_BNEP_SETUP:
+#if TINYPAN_USE_BLE_SLIP
+            /* In SLIP mode, there is no BNEP setup. We transition immediately. */
+            TINYPAN_LOG_INFO("SLIP Mode: BNEP setup skipped. Transitioning to DHCP.");
+            set_state(TINYPAN_STATE_DHCP);
+#else
             /* Check for timeout */
             if (timeout_elapsed(TINYPAN_BNEP_SETUP_TIMEOUT_MS)) {
                 TINYPAN_LOG_WARN("BNEP setup timeout");
@@ -206,14 +211,21 @@ void supervisor_process(void) {
 #endif
                 }
             }
+#endif
             break;
             
         case TINYPAN_STATE_DHCP:
             /* Check for timeout */
             if (timeout_elapsed(TINYPAN_DHCP_TIMEOUT_MS)) {
-                TINYPAN_LOG_WARN("DHCP timeout");
-                /* Stay connected, maybe retry DHCP */
-                /* For now, just wait - lwIP will keep trying */
+                TINYPAN_LOG_WARN("DHCP timeout. Disconnecting link to force host IP pool refresh.");
+                hal_bt_l2cap_disconnect();
+                
+#if TINYPAN_ENABLE_AUTO_RECONNECT
+                set_state(TINYPAN_STATE_RECONNECTING);
+                schedule_reconnect();
+#else
+                set_state(TINYPAN_STATE_ERROR);
+#endif
             }
             break;
             
@@ -281,9 +293,14 @@ void supervisor_on_l2cap_event(int event, int status) {
         case HAL_L2CAP_EVENT_CONNECTED:
             TINYPAN_LOG_INFO("L2CAP connected");
             if (s_state == TINYPAN_STATE_CONNECTING) {
+#if TINYPAN_USE_BLE_SLIP
+                /* SLIP mode skips BNEP. Assume layer 2 is up. */
+                set_state(TINYPAN_STATE_DHCP);
+#else
                 set_state(TINYPAN_STATE_BNEP_SETUP);
                 s_setup_retries = 0;
                 bnep_on_l2cap_connected();
+#endif
             }
             break;
             

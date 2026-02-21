@@ -39,7 +39,17 @@ static bool s_has_ip = false;
  */
 static void l2cap_recv_callback(const uint8_t* data, uint16_t len, void* user_data) {
     (void)user_data;
+#if TINYPAN_USE_BLE_SLIP
+#if TINYPAN_ENABLE_LWIP
+    /* In BLE SLIP mode, the BLE UART stream comes in here. Route raw bytes directly to the SLIP netif queue. */
+    tinypan_netif_input(NULL, NULL, 0, data, len);
+#else
+    /* No lwIP: frame is received but has nowhere to go */
+#endif
+#else
+    /* Native mode: parse BNEP headers */
     bnep_handle_incoming(data, len);
+#endif
 }
 
 /**

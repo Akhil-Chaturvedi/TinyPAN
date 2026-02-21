@@ -498,12 +498,17 @@ bool bnep_drain_control_tx_queue(void) {
 
 uint8_t bnep_get_ethernet_header_len(const uint8_t* dst_addr, const uint8_t* src_addr) {
 #if TINYPAN_ENABLE_COMPRESSION
+#if TINYPAN_FORCE_UNCOMPRESSED_TX
+    (void)dst_addr;
+    (void)src_addr;
+#else
     bool can_compress_dst = (memcmp(dst_addr, s_remote_addr, BNEP_ETHER_ADDR_LEN) == 0);
     bool can_compress_src = (memcmp(src_addr, s_local_addr, BNEP_ETHER_ADDR_LEN) == 0);
     
     if (can_compress_dst && can_compress_src) {
         return 3;
     }
+#endif
 #else
     (void)dst_addr;
     (void)src_addr;

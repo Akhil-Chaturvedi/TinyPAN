@@ -111,8 +111,10 @@ void hal_bt_l2cap_disconnect(void);
 /**
  * @brief Send data over the L2CAP channel
  * 
- * Sends a single contiguous buffer over the L2CAP channel.
- * The buffer contains the BNEP header followed by the IP payload.
+ * Sends a single contiguous buffer over the Bluetooth channel.
+ * In BNEP mode (TINYPAN_USE_BLE_SLIP=0), the buffer contains a BNEP header
+ * followed by an IP payload. In SLIP mode (TINYPAN_USE_BLE_SLIP=1), the buffer
+ * contains raw SLIP-escaped bytes.
  * 
  * **WARNING: UNALIGNED POINTERS**
  * The fast-path zero-copy transmit mechanism performs an in-place header swap,
@@ -124,6 +126,9 @@ void hal_bt_l2cap_disconnect(void);
  * Cortex-M3/M0/M4 BLE SoCs), your typical `memcpy` or DMA setup will hard-fault.
  * The HAL implementation MUST cleanly bounce or pad this buffer if hardware 
  * strict alignment is required.
+ * 
+ * *Suggestion: Implementation should check `((uintptr_t)data & 3)` and bounce 
+ * the buffer to an aligned block if required.*
  * 
  * @param data         Pointer to the BNEP frame (header + payload)
  * @param len          Total length of the frame

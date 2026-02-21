@@ -1,9 +1,8 @@
 /*
- * TinyPAN - Lightweight Bluetooth PAN Library
+ * TinyPAN - Bluetooth PAN Client Library
  * 
- * A minimal, portable PAN (Personal Area Network) client library that enables
- * microcontrollers with Bluetooth Classic to connect to the internet via a
- * phone's standard Bluetooth tethering feature.
+ * A portable PAN (Personal Area Network) client library for embedded systems.
+ * Supports Bluetooth Classic (BNEP) and BLE (SLIP) operating modes.
  *
  * Copyright (c) 2024
  * Licensed under MIT License
@@ -46,7 +45,7 @@ typedef enum {
     TINYPAN_STATE_SCANNING,         /**< Scanning for devices (reserved, not implemented) */
     TINYPAN_STATE_CONNECTING,       /**< L2CAP connection in progress */
     TINYPAN_STATE_BNEP_SETUP,       /**< BNEP setup handshake in progress */
-    TINYPAN_STATE_DHCP,             /**< BNEP connected, running DHCP */
+    TINYPAN_STATE_DHCP,             /**< L2CAP connected (BNEP negotiated or SLIP ready), running DHCP */
     TINYPAN_STATE_ONLINE,           /**< Fully connected, IP acquired */
     TINYPAN_STATE_STALLED,          /**< Link health check failed (reserved, not implemented) */
     TINYPAN_STATE_RECONNECTING,     /**< Disconnected, attempting reconnect */
@@ -58,7 +57,7 @@ typedef enum {
  */
 typedef enum {
     TINYPAN_EVENT_STATE_CHANGED,    /**< State has changed */
-    TINYPAN_EVENT_CONNECTED,        /**< BNEP connection established */
+    TINYPAN_EVENT_CONNECTED,        /**< Transport connection established (BNEP or SLIP) */
     TINYPAN_EVENT_DISCONNECTED,     /**< Connection lost */
     TINYPAN_EVENT_IP_ACQUIRED,      /**< IP address obtained via DHCP */
     TINYPAN_EVENT_IP_LOST,          /**< IP address lost */

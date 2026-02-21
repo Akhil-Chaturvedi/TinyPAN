@@ -30,10 +30,28 @@
 #endif
 
 /**
- * Size of the receive buffer.
+ * Size of the receive ring buffer (bytes).
+ * In SLIP mode (TINYPAN_USE_BLE_SLIP=1), incoming BLE UART bytes are queued
+ * here until lwIP's slipif drains them via sio_read(). Must be large enough
+ * to hold at least one full MTU-sized SLIP frame. Unused in BNEP mode.
  */
 #ifndef TINYPAN_RX_BUFFER_SIZE
 #define TINYPAN_RX_BUFFER_SIZE          1700
+#endif
+
+/* ============================================================================
+ * Queue Configuration
+ * ============================================================================ */
+
+/**
+ * Maximum number of frames in the TX queue before dropping.
+ * Due to the ring buffer design, this must be one larger than the 
+ * actual number of frames you want to buffer (e.g., 16 slots holds 15 frames).
+ * An ESP32 pulling a fast TCP stream can easily burst >7 frames quickly,
+ * so 16 is recommended for lwIP setups with large TCP windows.
+ */
+#ifndef TINYPAN_TX_QUEUE_LEN
+#define TINYPAN_TX_QUEUE_LEN                16
 #endif
 
 /* ============================================================================
@@ -82,10 +100,31 @@
 #endif
 
 /**
+ * Force uncompressed TX headers.
+ * Some older tethering hosts (especially Android) have buggy BNEP compression
+ * parsers that drop packets. Set this to 1 to force full 15-byte General Ethernet
+ * headers for all outgoing packets, even if address compression is possible.
+ */
+#ifndef TINYPAN_FORCE_UNCOMPRESSED_TX
+#define TINYPAN_FORCE_UNCOMPRESSED_TX       0
+#endif
+
+/**
  * Enable automatic reconnection on disconnect.
  */
 #ifndef TINYPAN_ENABLE_AUTO_RECONNECT
 #define TINYPAN_ENABLE_AUTO_RECONNECT       1
+#endif
+
+/**
+ * Operating Mode: Dual-Path Architecture
+ * 0: Native Bluetooth Classic (BNEP). Requires a BT Classic radio. Connects directly
+ *    to iOS/Android Personal Hotspot menus.
+ * 1: BLE Bridge Mode (SLIP). For pure BLE chips (nRF52, ESP32-C3). Requires a custom 
+ *    companion app on the phone to act as a VPN tunnel.
+ */
+#ifndef TINYPAN_USE_BLE_SLIP
+#define TINYPAN_USE_BLE_SLIP                0
 #endif
 
 /**
