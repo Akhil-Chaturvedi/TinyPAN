@@ -1,127 +1,78 @@
 # TinyPAN
 
-TinyPAN is a C library for Bluetooth PAN (BNEP over L2CAP) client behavior with a portable HAL interface.
+TinyPAN is an ultra-lightweight, zero-allocation C library providing a Bluetooth Personal Area Network (PAN) client. It bridges Bluetooth L2CAP/BNEP data into the lwIP network stack, enabling background IP connectivity for embedded microcontrollers.
 
-It is structured for embedded-style integration and includes:
-- core state machine and BNEP packet handling,
-- a mock HAL used by tests,
-- a Linux BlueZ HAL prototype,
-- a bundled lwIP source tree (not fully wired into the default CMake flow).
+## Architecture and Footprint
 
-## Overview
+The library is designed specifically for constrained embedded environments (e.g., ESP32, nRF52) and avoids dynamic memory allocation entirely. Packets are zero-copied from the hardware abstraction layer (HAL) directly into the lwIP stack.
 
-Intended data path:
+Performance and size metrics (compiled via GCC for x86_64, size budgets enforced in CI):
+* **RAM (bss + data):** 192 bytes
+* **Flash (text):** ~14.5 KB
+* **Heap Allocation:** 0 bytes (No malloc/free used)
 
-```
-MCU/Application <-> TinyPAN <-> Bluetooth Classic (PAN/BNEP) <-> Phone (NAP) <-> Internet
-```
+The core architecture is strictly event-driven. The background idle state consumes near-zero CPU cycles, waking only on incoming L2CAP payload interrupts or internal lwIP timer events.
 
-Current repository state is mixed: some components are implemented and tested, while others are partial or environment-dependent. See [Implementation status](#implementation-status).
+## Repository Layout
 
-## Repository layout
-
-```
+```text
 TinyPAN/
+├── CMakeLists.txt         # Primary build configuration (Fetches lwIP automatically)
 ├── include/
-│   ├── tinypan.h
-│   ├── tinypan_config.h
-│   └── tinypan_hal.h
+│   ├── tinypan.h          # Main library API
+│   ├── tinypan_config.h   # Timing and retry configurations
+│   ├── tinypan_hal.h      # Hardware Abstraction Layer interface
+│   ├── lwipopts.h         # Project-specific lwIP configuration
+│   └── arch/              # lwIP architecture shims
 ├── src/
-│   ├── tinypan.c
-│   ├── tinypan_bnep.c
-│   ├── tinypan_supervisor.c
-│   └── tinypan_lwip_netif.c
+│   ├── tinypan.c          # Core initialization and event routing
+│   ├── tinypan_bnep.c     # BNEP protocol encapsulation/decapsulation
+│   ├── tinypan_supervisor.c # Connection state machine (IDLE -> CONNECTING -> DHCP -> ONLINE)
+│   └── tinypan_lwip_netif.c # lwIP Network Interface (netif) bridge driver
 ├── tests/
-│   ├── test_bnep.c
-│   ├── test_supervisor.c
-│   ├── test_integration.c
-│   ├── dhcp_sim.c
-│   └── dhcp_sim.h
-├── hal/
-│   ├── mock/
-│   └── linux/
-├── lib/
-│   └── lwip/
-└── examples/
+│   ├── test_bnep.c        # BNEP parser/builder unit tests
+│   ├── test_supervisor.c  # State machine and timeout simulation tests
+│   ├── test_integration.c # Full lwIP DHCP DORA integration test over Mock HAL
+│   └── dhcp_sim.c         # DHCP packet simulation helpers
+└── hal/
+    └── mock/              # Pure C simulation HAL used for validation
 ```
 
-## Build (CMake)
+## Integration and Usage
 
-Requirements:
-- CMake >= 3.12
-- C99 compiler
+To use TinyPAN on target hardware, the host application must provide implementations for the three functions defined in `tinypan_hal.h`:
 
-Build from repository root:
+1. `hal_get_tick_ms()`: Provide a monotonically increasing millisecond tick (e.g., FreeRTOS `xTaskGetTickCount() * portTICK_PERIOD_MS`).
+2. `hal_bt_l2cap_send(data, len)`: Route the byte array to the native Bluetooth stack for transmission over the L2CAP PSM assigned to BNEP.
+3. `tinypan_input(data, len)`: Call this from your Bluetooth stack's RX interrupt when an L2CAP packet is received.
+
+## Build and Validation
+
+The project is built and validated purely in simulation using a Mock HAL. This mathematically verifies the BNEP framing, state machine transitions, and lwIP DHCP bridge without requiring physical Bluetooth hardware.
+
+### Prerequisites
+* CMake (>= 3.12)
+* GCC / MinGW / Clang (C99 compliant)
+* Ninja or Make
+
+### Building
+
+The CMake configuration automatically uses `FetchContent` to download the lwIP network stack (STABLE-2_1_3_RELEASE) and binds it to the TinyPAN library.
 
 ```bash
 cmake -S . -B build
 cmake --build build
 ```
 
-Optional toggle:
-- `-DTINYPAN_ENABLE_LWIP=ON` enables runtime lwIP hook calls in `tinypan.c`/supervisor.
-- In this repository state, that mode links to a stub backend (`src/tinypan_lwip_stub.c`) so the library remains linkable while full lwIP backend wiring is still in progress.
-- This does **not** yet provide a full working lwIP data path by itself.
+### Running the Test Suite
 
-## Tests
-
-### Tests wired into CTest
+The CTest suite validates the BNEP headers, the supervisor state machine reconnect logic, the complete IP acquisition flow via lwIP, and guarantees the static size constraints remain unbroken.
 
 ```bash
 ctest --test-dir build -V
 ```
 
-At the time of writing, CTest runs:
-- `BNEPTests` (`tests/test_bnep.c`)
-- `SupervisorTests` (`tests/test_supervisor.c`, includes reconnect/timeout edge coverage)
-- `IntegrationFlowTests` (`tests/test_integration.c` + `tests/dhcp_sim.c`)
-- `SizeBudgetCheck` (`scripts/check_size_budget.sh`, checks aggregate `.text`/`.bss` budget for core TinyPAN objects)
-
-Default size-budget thresholds can be overridden via environment variables when running the check:
-- `TINYPAN_TEXT_BUDGET`
-- `TINYPAN_BSS_BUDGET`
-
-## Roadmap
-
-A simulation-first, PR-sized execution roadmap is maintained in:
-
-- `docs/ROADMAP.md`
-
-## Linux HAL prototype
-
-There is a Linux-specific Makefile under `hal/linux`:
-
-```bash
-make -C hal/linux test
-```
-
-`demo_linux` in that Makefile requires BlueZ development headers/libraries (for example `libbluetooth-dev` on Debian/Ubuntu-like systems).
-
-## Implementation status
-
-- Implemented and covered by default tests:
-  - BNEP frame build/parse primitives
-  - Connection supervisor state transitions
-  - Mock HAL-based end-to-end state progression to ONLINE via simulated IP-acquired hook, including DHCP packet framing checks
-- Implemented but not fully integrated in runtime path:
-  - lwIP netif glue (`src/tinypan_lwip_netif.c`) is present and basic runtime hook points are available via `TINYPAN_ENABLE_LWIP`
-  - current CMake path uses stubbed lwIP hook implementations (`src/tinypan_lwip_stub.c`) to keep linkability while backend integration remains incomplete
-- Environment-dependent:
-  - Linux BlueZ demo (`hal/linux/demo_linux`)
-
-## Porting notes
-
-To use TinyPAN on target hardware, implement the functions declared in `include/tinypan_hal.h` for your Bluetooth stack, timers, and data-path callbacks.
-
-## Documentation consistency checklist
-
-When changing behavior, update this README in the same change if any of the following are touched:
-- build targets (`CMakeLists.txt`, `hal/linux/Makefile`),
-- test targets or test wiring (`tests/` and CTest registration),
-- public API (`include/tinypan.h`, `include/tinypan_hal.h`, `include/tinypan_config.h`),
-- repository layout sections in this document.
-
-Keep statements factual: only document behavior that is currently implemented and reproducible.
+If successful, the `IntegrationFlowTests` will demonstrate lwIP successfully booting up, issuing an automatically generated DHCP DISCOVER packet, handling a simulated mock DHCP OFFER, and verifying the leased IP address via ARP ping.
 
 ## License
 

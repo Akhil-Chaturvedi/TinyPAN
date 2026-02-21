@@ -1,5 +1,32 @@
+# CMake build artifacts
 build/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# Compiled objects and executables
 *.exe
 *.o
 *.obj
+*.out
+*.app
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+
+# Editor and OS files
 .vs/
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

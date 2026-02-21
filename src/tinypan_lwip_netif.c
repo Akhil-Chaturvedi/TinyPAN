@@ -22,6 +22,7 @@
 #include "lwip/init.h"
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
+#include "netif/ethernet.h"
 
 #include <string.h>
 
@@ -154,7 +155,7 @@ static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p) {
     /* Handle chained pbufs by copying to contiguous buffer if needed */
     if (p->next != NULL) {
         /* Chained pbuf - need to flatten */
-        static uint8_t tx_buf[TINYPAN_TX_BUFFER_SIZE];
+        static uint8_t tx_buf[TINYPAN_MAX_FRAME_SIZE];
         
         if (p->tot_len > sizeof(tx_buf) - 14) {
             TINYPAN_LOG_WARN("netif: Frame too large for buffer");
@@ -198,9 +199,9 @@ static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p) {
  */
 static void tinypan_netif_status_callback(struct netif* netif) {
     if (netif_is_up(netif)) {
-        ip4_addr_t* ip = netif_ip4_addr(netif);
-        ip4_addr_t* gw = netif_ip4_gw(netif);
-        ip4_addr_t* mask = netif_ip4_netmask(netif);
+        const ip4_addr_t* ip = netif_ip4_addr(netif);
+        const ip4_addr_t* gw = netif_ip4_gw(netif);
+        const ip4_addr_t* mask = netif_ip4_netmask(netif);
         
         if (ip->addr != 0) {
             TINYPAN_LOG_INFO("netif: IP acquired!");
@@ -245,8 +246,12 @@ int tinypan_netif_init(void) {
                       s_mac_addr[0], s_mac_addr[1], s_mac_addr[2],
                       s_mac_addr[3], s_mac_addr[4], s_mac_addr[5]);
     
-    /* Initialize lwIP */
-    lwip_init();
+    /* Initialize lwIP stack core (only once globally) */
+    static bool s_lwip_initialized = false;
+    if (!s_lwip_initialized) {
+        lwip_init();
+        s_lwip_initialized = true;
+    }
     
     /* Add our network interface */
     ip4_addr_t ipaddr, netmask, gateway;
@@ -399,4 +404,12 @@ void tinypan_netif_process(void) {
     
     /* Process lwIP timeouts */
     sys_check_timeouts();
+}
+
+/* ============================================================================
+ * lwIP System Time Provider
+ * ============================================================================ */
+
+u32_t sys_now(void) {
+    return hal_get_tick_ms();
 }

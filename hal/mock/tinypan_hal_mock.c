@@ -35,6 +35,10 @@ static void* s_event_callback_user_data = NULL;
 static bool s_use_mock_time = false;
 static uint32_t s_mock_tick_ms = 0;
 
+/* Last TX buffer capture for test inspection */
+static uint8_t s_last_tx_data[1500] = {0};
+static uint16_t s_last_tx_len = 0;
+
 /* ============================================================================
  * Mock Control API (for testing)
  * ============================================================================ */
@@ -209,6 +213,11 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
     TINYPAN_LOG_DEBUG("[MOCK] TX: %s", hex_buf);
     #endif
     
+    if (len <= sizeof(s_last_tx_data)) {
+        memcpy(s_last_tx_data, data, len);
+        s_last_tx_len = len;
+    }
+    
     return 0;
 }
 
@@ -264,4 +273,12 @@ int hal_nv_save(const char* key, const uint8_t* data, uint16_t len) {
     (void)len;
     /* Not implemented in mock */
     return -1;
+}
+
+const uint8_t* mock_hal_get_last_tx_data(void) {
+    return s_last_tx_data;
+}
+
+uint16_t mock_hal_get_last_tx_len(void) {
+    return s_last_tx_len;
 }

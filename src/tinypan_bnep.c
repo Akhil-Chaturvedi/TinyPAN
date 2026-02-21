@@ -22,9 +22,6 @@ static uint8_t s_local_addr[BNEP_ETHER_ADDR_LEN] = {0};
 /** Remote Ethernet/Bluetooth address */
 static uint8_t s_remote_addr[BNEP_ETHER_ADDR_LEN] = {0};
 
-/** Transmit buffer */
-static uint8_t s_tx_buffer[TINYPAN_TX_BUFFER_SIZE];
-
 /** Frame receive callback */
 static bnep_frame_recv_callback_t s_frame_callback = NULL;
 static void* s_frame_callback_user_data = NULL;
@@ -417,7 +414,8 @@ int bnep_send_setup_request(void) {
         /* Allow sending anyway for retries */
     }
     
-    int pkt_len = bnep_build_setup_request(s_tx_buffer, sizeof(s_tx_buffer),
+    uint8_t tx_buffer[16];
+    int pkt_len = bnep_build_setup_request(tx_buffer, sizeof(tx_buffer),
                                             BNEP_UUID_PANU, BNEP_UUID_NAP);
     if (pkt_len < 0) {
         TINYPAN_LOG_ERROR("Failed to build setup request");
@@ -426,7 +424,7 @@ int bnep_send_setup_request(void) {
     
     TINYPAN_LOG_DEBUG("Sending BNEP setup request (PANU -> NAP)");
     
-    int result = hal_bt_l2cap_send(s_tx_buffer, (uint16_t)pkt_len);
+    int result = hal_bt_l2cap_send(tx_buffer, (uint16_t)pkt_len);
     if (result < 0) {
         TINYPAN_LOG_ERROR("Failed to send setup request: %d", result);
         return result;
@@ -436,7 +434,8 @@ int bnep_send_setup_request(void) {
 }
 
 int bnep_send_setup_response(uint16_t response_code) {
-    int pkt_len = bnep_build_setup_response(s_tx_buffer, sizeof(s_tx_buffer),
+    uint8_t tx_buffer[8];
+    int pkt_len = bnep_build_setup_response(tx_buffer, sizeof(tx_buffer),
                                              response_code);
     if (pkt_len < 0) {
         TINYPAN_LOG_ERROR("Failed to build setup response");
@@ -445,7 +444,7 @@ int bnep_send_setup_response(uint16_t response_code) {
     
     TINYPAN_LOG_DEBUG("Sending BNEP setup response: 0x%04X", response_code);
     
-    int result = hal_bt_l2cap_send(s_tx_buffer, (uint16_t)pkt_len);
+    int result = hal_bt_l2cap_send(tx_buffer, (uint16_t)pkt_len);
     if (result < 0) {
         TINYPAN_LOG_ERROR("Failed to send setup response: %d", result);
         return result;
@@ -471,6 +470,11 @@ int bnep_send_ethernet_frame(const uint8_t* dst_addr,
     
     int pkt_len;
     
+    /* We use a C99 Variable Length Array (VLA) on the stack to dynamically assemble the packet
+       without using a massive persistent static buffer or malloc. The max size is small (~1500 bytes). */
+    uint16_t total_required = 15 + payload_len; /* Max possible BNEP header is 15 */
+    uint8_t tx_buffer[total_required];
+    
 #if TINYPAN_ENABLE_COMPRESSION
     /* Check if we can use compression */
     bool can_compress_dst = (memcmp(dst_addr, s_remote_addr, BNEP_ETHER_ADDR_LEN) == 0);
@@ -478,17 +482,17 @@ int bnep_send_ethernet_frame(const uint8_t* dst_addr,
     
     if (can_compress_dst && can_compress_src) {
         /* Fully compressed */
-        pkt_len = bnep_build_compressed_ethernet(s_tx_buffer, sizeof(s_tx_buffer),
+        pkt_len = bnep_build_compressed_ethernet(tx_buffer, sizeof(tx_buffer),
                                                    ethertype, payload, payload_len);
     } else {
         /* General Ethernet (no compression) */
-        pkt_len = bnep_build_general_ethernet(s_tx_buffer, sizeof(s_tx_buffer),
+        pkt_len = bnep_build_general_ethernet(tx_buffer, sizeof(tx_buffer),
                                                dst_addr, src_addr, ethertype,
                                                payload, payload_len);
     }
 #else
     /* Always use general Ethernet */
-    pkt_len = bnep_build_general_ethernet(s_tx_buffer, sizeof(s_tx_buffer),
+    pkt_len = bnep_build_general_ethernet(tx_buffer, sizeof(tx_buffer),
                                            dst_addr, src_addr, ethertype,
                                            payload, payload_len);
 #endif
@@ -498,7 +502,7 @@ int bnep_send_ethernet_frame(const uint8_t* dst_addr,
         return -1;
     }
     
-    int result = hal_bt_l2cap_send(s_tx_buffer, (uint16_t)pkt_len);
+    int result = hal_bt_l2cap_send(tx_buffer, (uint16_t)pkt_len);
     if (result > 0) {
         /* Busy */
         hal_bt_l2cap_request_can_send_now();

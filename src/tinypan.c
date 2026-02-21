@@ -72,12 +72,12 @@ static void bnep_frame_callback(const bnep_ethernet_frame_t* frame, void* user_d
 
     /* lwIP expects a complete Ethernet frame (dst + src + ethertype + payload). */
     uint16_t ethernet_len = (uint16_t)(14 + frame->payload_len);
-    if (ethernet_len > TINYPAN_TX_BUFFER_SIZE) {
+    if (ethernet_len > TINYPAN_MAX_FRAME_SIZE) {
         TINYPAN_LOG_WARN("Drop frame: too large for lwIP bridge (%u bytes)", ethernet_len);
         return;
     }
 
-    uint8_t ethernet_frame[TINYPAN_TX_BUFFER_SIZE];
+    uint8_t ethernet_frame[TINYPAN_MAX_FRAME_SIZE];
     memcpy(&ethernet_frame[0], frame->dst_addr, 6);
     memcpy(&ethernet_frame[6], frame->src_addr, 6);
     ethernet_frame[12] = (uint8_t)((frame->ethertype >> 8) & 0xFF);

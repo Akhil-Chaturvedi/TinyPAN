@@ -22,14 +22,6 @@
 #endif
 
 /**
- * Size of the transmit buffer.
- * Should be at least TINYPAN_MAX_FRAME_SIZE + BNEP header overhead (15 bytes max).
- */
-#ifndef TINYPAN_TX_BUFFER_SIZE
-#define TINYPAN_TX_BUFFER_SIZE          1700
-#endif
-
-/**
  * Size of the receive buffer.
  */
 #ifndef TINYPAN_RX_BUFFER_SIZE

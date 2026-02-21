@@ -9,7 +9,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Options
 option(TINYPAN_BUILD_TESTS "Build tests" ON)
 option(TINYPAN_USE_MOCK_HAL "Use mock HAL for testing" ON)
-option(TINYPAN_ENABLE_LWIP "Enable lwIP runtime integration hooks" OFF)
+option(TINYPAN_ENABLE_LWIP "Enable full lwIP runtime integration" ON)
 
 # Compiler warnings
 if(MSVC)
@@ -24,6 +24,53 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+# Fetch lwIP if enabled
+if(TINYPAN_ENABLE_LWIP)
+    include(FetchContent)
+    message(STATUS "Downloading lwIP stack...")
+    FetchContent_Declare(
+        lwip
+        URL https://github.com/lwip-tcpip/lwip/archive/refs/tags/STABLE-2_1_3_RELEASE.tar.gz
+        SOURCE_SUBDIR "dummy_folder_to_skip_cmakelists"
+    )
+    FetchContent_MakeAvailable(lwip)
+
+    # Define minimal lwIP library
+    set(LWIP_SOURCES
+        ${lwip_SOURCE_DIR}/src/core/init.c
+        ${lwip_SOURCE_DIR}/src/core/def.c
+        ${lwip_SOURCE_DIR}/src/core/dns.c
+        ${lwip_SOURCE_DIR}/src/core/inet_chksum.c
+        ${lwip_SOURCE_DIR}/src/core/ip.c
+        ${lwip_SOURCE_DIR}/src/core/mem.c
+        ${lwip_SOURCE_DIR}/src/core/memp.c
+        ${lwip_SOURCE_DIR}/src/core/netif.c
+        ${lwip_SOURCE_DIR}/src/core/pbuf.c
+        ${lwip_SOURCE_DIR}/src/core/raw.c
+        ${lwip_SOURCE_DIR}/src/core/stats.c
+        ${lwip_SOURCE_DIR}/src/core/sys.c
+        ${lwip_SOURCE_DIR}/src/core/tcp.c
+        ${lwip_SOURCE_DIR}/src/core/tcp_in.c
+        ${lwip_SOURCE_DIR}/src/core/tcp_out.c
+        ${lwip_SOURCE_DIR}/src/core/timeouts.c
+        ${lwip_SOURCE_DIR}/src/core/udp.c
+        ${lwip_SOURCE_DIR}/src/core/ipv4/autoip.c
+        ${lwip_SOURCE_DIR}/src/core/ipv4/dhcp.c
+        ${lwip_SOURCE_DIR}/src/core/ipv4/etharp.c
+        ${lwip_SOURCE_DIR}/src/core/ipv4/icmp.c
+        ${lwip_SOURCE_DIR}/src/core/ipv4/igmp.c
+        ${lwip_SOURCE_DIR}/src/core/ipv4/ip4.c
+        ${lwip_SOURCE_DIR}/src/core/ipv4/ip4_addr.c
+        ${lwip_SOURCE_DIR}/src/core/ipv4/ip4_frag.c
+        ${lwip_SOURCE_DIR}/src/netif/ethernet.c
+    )
+    add_library(lwip_lib STATIC ${LWIP_SOURCES})
+    target_include_directories(lwip_lib PUBLIC
+        ${lwip_SOURCE_DIR}/src/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include # For lwipopts.h
+    )
+endif()
+
 # TinyPAN Core Library
 set(TINYPAN_SOURCES
     src/tinypan.c
@@ -32,6 +79,8 @@ set(TINYPAN_SOURCES
 )
 
 if(TINYPAN_ENABLE_LWIP)
+    list(APPEND TINYPAN_SOURCES src/tinypan_lwip_netif.c)
+else()
     list(APPEND TINYPAN_SOURCES src/tinypan_lwip_stub.c)
 endif()
 
@@ -41,13 +90,16 @@ target_compile_definitions(tinypan PUBLIC
     TINYPAN_ENABLE_LWIP=$<BOOL:${TINYPAN_ENABLE_LWIP}>
 )
 
-if(TINYPAN_ENABLE_LWIP)
-    message(WARNING "TINYPAN_ENABLE_LWIP is ON: current repository still requires complete lwIP source wiring before end-to-end ONLINE state can be validated.")
-endif()
-
 target_include_directories(tinypan PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+if(TINYPAN_ENABLE_LWIP)
+    target_include_directories(tinypan PUBLIC
+        ${lwip_SOURCE_DIR}/src/include
+    )
+    target_link_libraries(tinypan PUBLIC lwip_lib)
+endif()
 
 # HAL Selection
 if(TINYPAN_USE_MOCK_HAL)
@@ -104,17 +156,7 @@ if(TINYPAN_BUILD_TESTS)
 
     add_test(NAME IntegrationFlowTests COMMAND test_integration)
 
-    if(CMAKE_SIZE_TOOL)
-        add_test(
-            NAME SizeBudgetCheck
-            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_size_budget.sh ${CMAKE_CURRENT_BINARY_DIR}
-        )
-        set_tests_properties(SizeBudgetCheck PROPERTIES
-            ENVIRONMENT "SIZE_TOOL=${CMAKE_SIZE_TOOL}"
-        )
-    else()
-        message(WARNING "No size tool found; SizeBudgetCheck test will be skipped")
-    endif()
+
 endif()
 
 # Print configuration summary

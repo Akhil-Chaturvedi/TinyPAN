@@ -160,6 +160,22 @@ int dhcp_sim_build_ack(uint8_t* buffer, uint16_t buffer_size,
     return build_dhcp_message(buffer, buffer_size, config, xid, client_mac, DHCP_ACK);
 }
 
+static uint16_t calc_checksum(const uint8_t* ptr, int len) {
+    uint32_t sum = 0;
+    while (len > 1) {
+        sum += ((uint16_t)ptr[0] << 8) | ptr[1];
+        ptr += 2;
+        len -= 2;
+    }
+    if (len > 0) {
+        sum += ((uint16_t)ptr[0] << 8);
+    }
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return (uint16_t)(~sum);
+}
+
 int dhcp_sim_build_bnep_packet(uint8_t* buffer, uint16_t buffer_size,
                                 const uint8_t src_mac[6],
                                 const uint8_t dst_mac[6],
@@ -209,11 +225,17 @@ int dhcp_sim_build_bnep_packet(uint8_t* buffer, uint16_t buffer_size,
     buffer[pos++] = 0x00; buffer[pos++] = 0x00;  /* Flags/Fragment */
     buffer[pos++] = 64;   /* TTL */
     buffer[pos++] = 17;   /* Protocol: UDP */
-    buffer[pos++] = 0x00; buffer[pos++] = 0x00;  /* Header checksum (0 for now) */
+    
+    uint16_t checksum_pos = pos;
+    buffer[pos++] = 0x00; buffer[pos++] = 0x00;  /* Header checksum placeholder */
     WRITE_BE32(&buffer[pos], src_ip);
     pos += 4;
     WRITE_BE32(&buffer[pos], dst_ip);
     pos += 4;
+    
+    /* Calculate IPv4 header checksum */
+    uint16_t ip_chksum = calc_checksum(&buffer[15], 20); /* 15 is bnep offset */
+    WRITE_BE16(&buffer[checksum_pos], ip_chksum);
     
     /* UDP Header */
     WRITE_BE16(&buffer[pos], DHCP_SERVER_PORT);  /* Source port */
