@@ -331,22 +331,36 @@ void tinypan_netif_set_link(bool up) {
     }
 }
 
-void tinypan_netif_input(const uint8_t* data, uint16_t len) {
-    if (!s_initialized || data == NULL || len == 0) {
+void tinypan_netif_input(const uint8_t* dst_addr, const uint8_t* src_addr,
+                          uint16_t ethertype, const uint8_t* payload,
+                          uint16_t payload_len) {
+    if (!s_initialized || dst_addr == NULL || src_addr == NULL) {
         return;
     }
     
-    TINYPAN_LOG_DEBUG("netif RX: %u bytes", len);
+    uint16_t total_len = 14 + payload_len;
+    TINYPAN_LOG_DEBUG("netif RX: %u bytes", total_len);
     
-    /* Allocate a pbuf to hold the received data */
-    struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
+    /* Allocate a pbuf to hold the received data directly into lwIP pool */
+    struct pbuf* p = pbuf_alloc(PBUF_RAW, total_len, PBUF_POOL);
     if (p == NULL) {
         TINYPAN_LOG_WARN("netif: Failed to allocate pbuf for RX");
         return;
     }
     
-    /* Copy data into pbuf */
-    pbuf_take(p, data, len);
+    /* Copy data directly into pbuf, avoiding intermediate array copies */
+    /* pbuf_take_at handles traversing chained PBUF_POOL pbufs safely */
+    pbuf_take_at(p, dst_addr, BNEP_ETHER_ADDR_LEN, 0);
+    pbuf_take_at(p, src_addr, BNEP_ETHER_ADDR_LEN, 6);
+    
+    uint8_t type_bytes[2];
+    type_bytes[0] = (uint8_t)(ethertype >> 8);
+    type_bytes[1] = (uint8_t)(ethertype & 0xFF);
+    pbuf_take_at(p, type_bytes, 2, 12);
+    
+    if (payload != NULL && payload_len > 0) {
+        pbuf_take_at(p, payload, payload_len, 14);
+    }
     
     /* Pass to lwIP's Ethernet input */
     if (s_netif.input(p, &s_netif) != ERR_OK) {

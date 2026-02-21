@@ -11,7 +11,7 @@ Performance and size metrics (compiled via GCC for x86_64, size budgets enforced
 * **Flash (text):** ~14.5 KB
 * **Heap Allocation:** 0 bytes (No malloc/free used)
 
-The core architecture is strictly event-driven. The background idle state consumes near-zero CPU cycles, waking only on incoming L2CAP payload interrupts or internal lwIP timer events.
+The core architecture is an RTOS-friendly polling pump. The background idle state consumes near-zero CPU cycles, driven by a periodic `tinypan_process()` tick to handle lwIP timeouts, and waking instantly on incoming L2CAP payload interrupts.
 
 ## Repository Layout
 

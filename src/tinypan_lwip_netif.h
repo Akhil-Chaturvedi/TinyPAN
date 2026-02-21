@@ -59,12 +59,18 @@ void tinypan_netif_set_link(bool up);
  * @brief Process incoming Ethernet frame from BNEP
  * 
  * Called by the BNEP layer when an Ethernet frame is received.
- * Passes the frame to lwIP for processing.
+ * Passes the discrete frame components directly into lwIP's pbuf pool
+ * to achieve zero-copy (or single-copy) routing.
  * 
- * @param data   Pointer to Ethernet frame data
- * @param len    Length of frame data
+ * @param dst_addr   Destination MAC address (6 bytes)
+ * @param src_addr   Source MAC address (6 bytes)
+ * @param ethertype  EtherType (network byte order)
+ * @param payload    Pointer to Ethernet payload
+ * @param payload_len Length of Ethernet payload
  */
-void tinypan_netif_input(const uint8_t* data, uint16_t len);
+void tinypan_netif_input(const uint8_t* dst_addr, const uint8_t* src_addr,
+                          uint16_t ethertype, const uint8_t* payload,
+                          uint16_t payload_len);
 
 /**
  * @brief Get the lwIP netif structure

@@ -42,15 +42,17 @@ static void* s_setup_response_callback_user_data = NULL;
  * @brief Write 16-bit value in big-endian (network byte order)
  */
 static inline void write_be16(uint8_t* buffer, uint16_t value) {
-    buffer[0] = (uint8_t)(value >> 8);
-    buffer[1] = (uint8_t)(value & 0xFF);
+    uint16_t be_val = TINYPAN_HTONS(value);
+    memcpy(buffer, &be_val, 2);
 }
 
 /**
- * @brief Read 16-bit value from big-endian (network byte order)
+ * @brief Read 16-bit value safely from potentially unaligned buffer
  */
 static inline uint16_t read_be16(const uint8_t* buffer) {
-    return ((uint16_t)buffer[0] << 8) | buffer[1];
+    uint16_t val;
+    memcpy(&val, buffer, 2);
+    return TINYPAN_NTOHS(val);
 }
 
 /**
@@ -266,10 +268,21 @@ int bnep_parse_ethernet_frame(const uint8_t* data, uint16_t len,
         return -1;
     }
     
-    /* TODO: Handle extension headers if present */
-    if (has_ext) {
-        TINYPAN_LOG_WARN("Extension headers not supported yet");
-        /* For now, we'll try to parse anyway */
+    uint16_t ext_offset = header_len;
+    while (has_ext) {
+        if (ext_offset + 2 > len) {
+            TINYPAN_LOG_WARN("Packet too short for BNEP extension header");
+            return -1;
+        }
+        uint8_t ext_type = data[ext_offset];
+        uint8_t ext_len = data[ext_offset + 1];
+        has_ext = (ext_type & BNEP_EXT_HEADER_FLAG) != 0;
+        ext_offset += 2 + ext_len;
+    }
+    
+    if (ext_offset > len) {
+        TINYPAN_LOG_WARN("BNEP extension payload exceeds packet length");
+        return -1;
     }
     
     switch (pkt_type) {
@@ -278,8 +291,6 @@ int bnep_parse_ethernet_frame(const uint8_t* data, uint16_t len,
             memcpy(frame->dst_addr, &data[1], BNEP_ETHER_ADDR_LEN);
             memcpy(frame->src_addr, &data[7], BNEP_ETHER_ADDR_LEN);
             frame->ethertype = read_be16(&data[13]);
-            frame->payload = &data[15];
-            frame->payload_len = len - 15;
             break;
             
         case BNEP_PKT_TYPE_COMPRESSED_ETHERNET:
@@ -291,8 +302,6 @@ int bnep_parse_ethernet_frame(const uint8_t* data, uint16_t len,
             memcpy(frame->dst_addr, local_addr, BNEP_ETHER_ADDR_LEN);
             memcpy(frame->src_addr, remote_addr, BNEP_ETHER_ADDR_LEN);
             frame->ethertype = read_be16(&data[1]);
-            frame->payload = &data[3];
-            frame->payload_len = len - 3;
             break;
             
         case BNEP_PKT_TYPE_COMPRESSED_SRC_ONLY:
@@ -303,8 +312,6 @@ int bnep_parse_ethernet_frame(const uint8_t* data, uint16_t len,
             memcpy(frame->dst_addr, local_addr, BNEP_ETHER_ADDR_LEN);
             memcpy(frame->src_addr, &data[1], BNEP_ETHER_ADDR_LEN);
             frame->ethertype = read_be16(&data[7]);
-            frame->payload = &data[9];
-            frame->payload_len = len - 9;
             break;
             
         case BNEP_PKT_TYPE_COMPRESSED_DST_ONLY:
@@ -315,13 +322,15 @@ int bnep_parse_ethernet_frame(const uint8_t* data, uint16_t len,
             memcpy(frame->dst_addr, &data[1], BNEP_ETHER_ADDR_LEN);
             memcpy(frame->src_addr, remote_addr, BNEP_ETHER_ADDR_LEN);
             frame->ethertype = read_be16(&data[7]);
-            frame->payload = &data[9];
-            frame->payload_len = len - 9;
             break;
             
         default:
             return -1;
     }
+    
+    /* Payload follows extension headers (if any) */
+    frame->payload = &data[ext_offset];
+    frame->payload_len = len - ext_offset;
     
     return 0;
 }
@@ -468,12 +477,14 @@ int bnep_send_ethernet_frame(const uint8_t* dst_addr,
         return 1;  /* Busy, try again */
     }
     
-    int pkt_len;
-    
-    /* We use a C99 Variable Length Array (VLA) on the stack to dynamically assemble the packet
-       without using a massive persistent static buffer or malloc. The max size is small (~1500 bytes). */
+    /* We use a statically allocated transmission buffer since TinyPAN is strictly
+       single-threaded. This completely eliminates the VLA stack-overflow risk. */
     uint16_t total_required = 15 + payload_len; /* Max possible BNEP header is 15 */
-    uint8_t tx_buffer[total_required];
+    if (total_required > TINYPAN_MAX_FRAME_SIZE) {
+        TINYPAN_LOG_ERROR("Frame too large for TX buffer: %u", total_required);
+        return -1;
+    }
+    static uint8_t tx_buffer[TINYPAN_MAX_FRAME_SIZE];
     
 #if TINYPAN_ENABLE_COMPRESSION
     /* Check if we can use compression */

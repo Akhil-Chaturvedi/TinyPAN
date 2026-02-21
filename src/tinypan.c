@@ -70,21 +70,10 @@ static void bnep_frame_callback(const bnep_ethernet_frame_t* frame, void* user_d
         return;
     }
 
-    /* lwIP expects a complete Ethernet frame (dst + src + ethertype + payload). */
-    uint16_t ethernet_len = (uint16_t)(14 + frame->payload_len);
-    if (ethernet_len > TINYPAN_MAX_FRAME_SIZE) {
-        TINYPAN_LOG_WARN("Drop frame: too large for lwIP bridge (%u bytes)", ethernet_len);
-        return;
-    }
-
-    uint8_t ethernet_frame[TINYPAN_MAX_FRAME_SIZE];
-    memcpy(&ethernet_frame[0], frame->dst_addr, 6);
-    memcpy(&ethernet_frame[6], frame->src_addr, 6);
-    ethernet_frame[12] = (uint8_t)((frame->ethertype >> 8) & 0xFF);
-    ethernet_frame[13] = (uint8_t)(frame->ethertype & 0xFF);
-    memcpy(&ethernet_frame[14], frame->payload, frame->payload_len);
-
-    tinypan_netif_input(ethernet_frame, ethernet_len);
+    /* Pass the raw pointers directly to lwIP to achieve true
+       single-copy routing (copied only when instantiating the pbuf) */
+    tinypan_netif_input(frame->dst_addr, frame->src_addr, frame->ethertype,
+                        frame->payload, frame->payload_len);
 #else
     /* TODO: Pass to lwIP netif */
 #endif

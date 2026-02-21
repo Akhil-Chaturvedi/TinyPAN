@@ -147,8 +147,17 @@
 
 /**
  * Byte order helpers.
- * Override if your platform has different endianness functions.
+ * When lwIP is enabled, we route these to lwIP's highly optimized compiler intrinsics.
+ * Otherwise, use the fallback overrides.
  */
+#if TINYPAN_ENABLE_LWIP
+#include "lwip/def.h"
+#define TINYPAN_HTONS(x)    lwip_htons(x)
+#define TINYPAN_NTOHS(x)    lwip_ntohs(x)
+#define TINYPAN_HTONL(x)    lwip_htonl(x)
+#define TINYPAN_NTOHL(x)    lwip_ntohl(x)
+#else
+
 #ifndef TINYPAN_HTONS
 #define TINYPAN_HTONS(x)    ((((x) & 0xFF) << 8) | (((x) >> 8) & 0xFF))
 #endif
@@ -164,6 +173,8 @@
 
 #ifndef TINYPAN_NTOHL
 #define TINYPAN_NTOHL(x)    TINYPAN_HTONL(x)
+#endif
+
 #endif
 
 #endif /* TINYPAN_CONFIG_H */
