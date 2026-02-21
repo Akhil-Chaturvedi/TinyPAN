@@ -128,8 +128,11 @@ static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p) {
         return ERR_ARG;
     }
     
-    /* Check if we can use the true zero-copy fast path */
-    bool can_send_now = (s_tx_queue_head == s_tx_queue_tail) && hal_bt_l2cap_can_send();
+    /* Check if we can use the true zero-copy fast path.
+       It must be ready, the queue must be empty, AND the pbuf must be contiguous! */
+    bool can_send_now = (s_tx_queue_head == s_tx_queue_tail) && 
+                        hal_bt_l2cap_can_send() && 
+                        (p->next == NULL);
     
     if (can_send_now) {
         /* FAST PATH: ZERO ALLOCATIONS, ZERO COPIES
@@ -191,11 +194,12 @@ static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p) {
         return ERR_OK;
     }
     
-    /* SLOW PATH (Radio Busy): Now we must queue it.
+    /* SLOW PATH (Radio Busy or Chained Pbuf): We must clone and queue.
        Because etharp_output unconditionally strips the MAC header (pbuf_remove_header(p, 14))
        immediately after we return, queueing the original struct pbuf* p by reference is
-       fatal. We must physically detach from lwIP's volatile sequence path by cloning 
-       every packet into a contiguous PBUF_RAM block before modifying it. 
+       fatal. Chained pbufs (p->next != NULL) also end up here, since the HAL expects
+       a single contiguous buffer. We must physically detach from lwIP's volatile sequence
+       path by cloning every packet into a contiguous PBUF_RAM block before modifying it.
        
        CRITICAL: We cannot use pbuf_clone(PBUF_RAW, ...). It allocates exactly `p->tot_len` 
        and destroys the PBUF_LINK_ENCAPSULATION_HLEN headroom. We must manually allocate a

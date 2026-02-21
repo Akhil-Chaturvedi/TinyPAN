@@ -40,7 +40,7 @@
 
 /* PBUF pool sizing */
 #define PBUF_POOL_SIZE              4
-#define PBUF_POOL_BUFSIZE           1500
+#define PBUF_POOL_BUFSIZE           1536
 
 /* Reserve space at the head of every pbuf for the BNEP encapsulation header */
 #define PBUF_LINK_ENCAPSULATION_HLEN 15

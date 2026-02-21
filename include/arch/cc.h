@@ -36,9 +36,9 @@
 #define U16_F "hu"
 #define S16_F "hd"
 #define X16_F "hx"
-#define U32_F "lu"
-#define S32_F "ld"
-#define X32_F "lx"
+#define U32_F "u"
+#define S32_F "d"
+#define X32_F "x"
 #define SZT_F "zu"
 
 /* Compiler hints */
