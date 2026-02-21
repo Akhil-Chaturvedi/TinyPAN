@@ -84,6 +84,8 @@ The suite includes:
 
 - **TX path uses in-place header swap on the fast path.** When the radio is ready, the queue is empty, and the pbuf is a single contiguous segment (`p->next == NULL`), `tinypan_netif_linkoutput` manipulates lwIP's original `pbuf` in-place (strip Ethernet header, add BNEP header, send, revert) with zero allocations or copies. Chained pbufs (e.g., from TCP scatter-gather) and busy-radio conditions fall through to the slow path, which clones the pbuf via `pbuf_alloc(PBUF_LINK, ...) + pbuf_copy()` to flatten and detach it before queuing.
 
+  > **WARNING**: The in-place swap shifts the memory pointer backward by exactly 1 byte (14 bytes stripped, 15 bytes added). If your hardware's DMA requires 32-bit aligned source pointers, the HAL's `hal_bt_l2cap_send` implementation MUST buffer or software-copy the payload. Passing an unaligned `pbuf` pointer directly to an inflexible DMA will trigger a HardFault.
+
 - **TX queue is bounded.** The internal TX queue holds up to `TINYPAN_TX_QUEUE_LEN` (default 8) packets. If the queue is full, the packet is dropped and `ERR_MEM` is returned to lwIP.
 
 - **BNEP filter requests are declined.** When the NAP sends BNEP filter set requests, TinyPAN responds with `0x0001` (Unsupported Request). This is spec-compliant and means the NAP must handle its own filtering.

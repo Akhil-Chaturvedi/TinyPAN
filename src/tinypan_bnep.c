@@ -35,6 +35,10 @@ static void* s_state_callback_user_data = NULL;
 static bnep_setup_response_callback_t s_setup_response_callback = NULL;
 static void* s_setup_response_callback_user_data = NULL;
 
+/** Control packet retry buffer */
+static uint8_t s_pending_control_buf[16];
+static uint8_t s_pending_control_len = 0;
+
 /* ============================================================================
  * Helper Functions
  * ============================================================================ */
@@ -460,7 +464,11 @@ int bnep_send_setup_response(uint16_t response_code) {
     
     int result = hal_bt_l2cap_send(tx_buffer, (uint16_t)pkt_len);
     if (result > 0) {
-        TINYPAN_LOG_DEBUG("L2CAP busy, cannot send BNEP setup response");
+        TINYPAN_LOG_DEBUG("L2CAP busy, queuing BNEP setup response");
+        if ((size_t)pkt_len <= sizeof(s_pending_control_buf)) {
+            memcpy(s_pending_control_buf, tx_buffer, pkt_len);
+            s_pending_control_len = (uint8_t)pkt_len;
+        }
         hal_bt_l2cap_request_can_send_now();
         return TINYPAN_ERR_BUSY;
     } else if (result < 0) {
@@ -469,6 +477,23 @@ int bnep_send_setup_response(uint16_t response_code) {
     }
     
     return 0;
+}
+
+bool bnep_drain_control_tx_queue(void) {
+    if (s_pending_control_len > 0) {
+        int result = hal_bt_l2cap_send(s_pending_control_buf, s_pending_control_len);
+        if (result == 0) {
+            s_pending_control_len = 0; /* Sent successfully */
+            return true;
+        } else if (result > 0) {
+            hal_bt_l2cap_request_can_send_now();
+            return false; /* Still busy */
+        } else {
+            TINYPAN_LOG_ERROR("Failed to drain BNEP control packet: %d", result);
+            s_pending_control_len = 0; /* Drop on fatal error */
+        }
+    }
+    return true; /* Queue empty or finished draining */
 }
 
 uint8_t bnep_get_ethernet_header_len(const uint8_t* dst_addr, const uint8_t* src_addr) {
@@ -558,7 +583,17 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
                     resp_type,
                     0x00, 0x01  /* Unsupported Request */
                 };
-                hal_bt_l2cap_send(resp, sizeof(resp));
+                int result = hal_bt_l2cap_send(resp, sizeof(resp));
+                if (result > 0) {
+                    TINYPAN_LOG_DEBUG("L2CAP busy, queuing filter response");
+                    if (sizeof(resp) <= sizeof(s_pending_control_buf)) {
+                        memcpy(s_pending_control_buf, resp, sizeof(resp));
+                        s_pending_control_len = sizeof(resp);
+                    }
+                    hal_bt_l2cap_request_can_send_now();
+                } else if (result < 0) {
+                    TINYPAN_LOG_ERROR("Failed to send filter response: %d", result);
+                }
             }
             break;
             

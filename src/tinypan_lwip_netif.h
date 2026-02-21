@@ -122,6 +122,13 @@ void tinypan_netif_process(void);
  */
 void tinypan_netif_drain_tx_queue(void);
 
+/**
+ * @brief Flush the transmission queue
+ * 
+ * Frees all queued packets to prevent memory leaks on disconnect.
+ */
+void tinypan_netif_flush_queue(void);
+
 #ifdef __cplusplus
 }
 #endif

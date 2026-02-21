@@ -508,8 +508,27 @@ void tinypan_netif_process(void) {
     sys_check_timeouts();
 }
 
+void tinypan_netif_flush_queue(void) {
+    while (s_tx_queue_head != s_tx_queue_tail) {
+        if (s_tx_queue[s_tx_queue_head] != NULL) {
+            pbuf_free(s_tx_queue[s_tx_queue_head]);
+            s_tx_queue[s_tx_queue_head] = NULL;
+        }
+        s_tx_queue_head = (s_tx_queue_head + 1) % TINYPAN_TX_QUEUE_LEN;
+    }
+}
+
 void tinypan_netif_drain_tx_queue(void) {
     if (!s_initialized) {
+        return;
+    }
+    
+    /* Always give priority to BNEP control packets */
+    if (!bnep_drain_control_tx_queue()) {
+        return; /* Still busy, control packet couldn't be sent */
+    }
+
+    if (s_tx_queue_head == s_tx_queue_tail) {
         return;
     }
     

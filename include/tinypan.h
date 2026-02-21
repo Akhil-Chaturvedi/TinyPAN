@@ -43,12 +43,12 @@ typedef uint8_t tinypan_bd_addr_t[6];
  */
 typedef enum {
     TINYPAN_STATE_IDLE = 0,         /**< Not started, waiting */
-    TINYPAN_STATE_SCANNING,         /**< Scanning for devices (future) */
+    TINYPAN_STATE_SCANNING,         /**< Scanning for devices (reserved, not implemented) */
     TINYPAN_STATE_CONNECTING,       /**< L2CAP connection in progress */
     TINYPAN_STATE_BNEP_SETUP,       /**< BNEP setup handshake in progress */
     TINYPAN_STATE_DHCP,             /**< BNEP connected, running DHCP */
     TINYPAN_STATE_ONLINE,           /**< Fully connected, IP acquired */
-    TINYPAN_STATE_STALLED,          /**< Link health check failed, probing */
+    TINYPAN_STATE_STALLED,          /**< Link health check failed (reserved, not implemented) */
     TINYPAN_STATE_RECONNECTING,     /**< Disconnected, attempting reconnect */
     TINYPAN_STATE_ERROR             /**< Permanent failure */
 } tinypan_state_t;

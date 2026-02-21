@@ -216,6 +216,15 @@ int bnep_send_setup_request(void);
 int bnep_send_setup_response(uint16_t response_code);
 
 /**
+ * @brief Drain the pending control packet queue
+ * 
+ * Called by tinypan_netif_drain_tx_queue.
+ * 
+ * @return true if queue is empty or successfully drained, false if still busy.
+ */
+bool bnep_drain_control_tx_queue(void);
+
+/**
  * @brief Get the BNEP header length for an Ethernet frame
  * 
  * Determines whether compression can be applied based on the addresses.

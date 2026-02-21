@@ -218,7 +218,8 @@ void supervisor_process(void) {
             break;
             
         case TINYPAN_STATE_ONLINE:
-            /* Not implemented: heartbeat / keepalive monitoring */
+            /* Not implemented: heartbeat/keepalive monitoring.
+               TINYPAN_STATE_STALLED is reserved for future use. */
             break;
             
         case TINYPAN_STATE_STALLED:
@@ -386,7 +387,7 @@ void supervisor_on_bnep_setup_response(uint16_t response_code) {
 }
 
 void supervisor_on_ip_acquired(void) {
-    TINYPAN_LOG_INFO("IP acquired - we are ONLINE!");
+    TINYPAN_LOG_INFO("IP acquired, transitioning to ONLINE");
     set_state(TINYPAN_STATE_ONLINE);
 }
 

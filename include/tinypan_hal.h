@@ -114,6 +114,17 @@ void hal_bt_l2cap_disconnect(void);
  * Sends a single contiguous buffer over the L2CAP channel.
  * The buffer contains the BNEP header followed by the IP payload.
  * 
+ * **WARNING: UNALIGNED POINTERS**
+ * The fast-path zero-copy transmit mechanism performs an in-place header swap,
+ * which inherently shifts the start of the payload by 1 byte. As a result,
+ * the `data` pointer passed to this function is **not** guaranteed to be
+ * 32-bit aligned.
+ * 
+ * If your hardware DMA controller requires aligned source addresses (e.g. many
+ * Cortex-M3/M0/M4 BLE SoCs), your typical `memcpy` or DMA setup will hard-fault.
+ * The HAL implementation MUST cleanly bounce or pad this buffer if hardware 
+ * strict alignment is required.
+ * 
  * @param data         Pointer to the BNEP frame (header + payload)
  * @param len          Total length of the frame
  * @return 0 on success, negative error code on failure, positive if busy (try again)

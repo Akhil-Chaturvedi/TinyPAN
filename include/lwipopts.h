@@ -34,7 +34,7 @@
 #define ETHARP_DEBUG                LWIP_DBG_ON
 #define UDP_DEBUG                   LWIP_DBG_ON
 
-/* Memory optimization (Very Lightweight) */
+/* Memory configuration */
 #define MEM_ALIGNMENT               4
 #define MEM_SIZE                    (4 * 1024)  /* 4KB heap for packets/state */
 

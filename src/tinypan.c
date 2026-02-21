@@ -72,8 +72,8 @@ static void bnep_frame_callback(const bnep_ethernet_frame_t* frame, void* user_d
         return;
     }
 
-    /* Pass the raw pointers directly to lwIP to achieve true
-       single-copy routing (copied only when instantiating the pbuf) */
+    /* Pass the raw pointers directly to lwIP; the netif layer
+       copies them into a pbuf for stack processing */
     tinypan_netif_input(frame->dst_addr, frame->src_addr, frame->ethertype,
                         frame->payload, frame->payload_len);
 #else
@@ -196,6 +196,7 @@ void tinypan_stop(void) {
     supervisor_stop();
 
 #if TINYPAN_ENABLE_LWIP
+    tinypan_netif_flush_queue();
     tinypan_netif_stop_dhcp();
     tinypan_netif_set_link(false);
 #endif
@@ -241,7 +242,7 @@ uint32_t tinypan_get_next_timeout_ms(void) {
     uint32_t sleep_ms = 0xFFFFFFFF;
     
 #if TINYPAN_ENABLE_LWIP
-    /* Get lwIP's internal timer resolution (DHCP renew, TCP ACKs, etc.) */
+    /* Get lwIP's internal timer resolution (DHCP retransmit, ARP timeouts, etc.) */
     uint32_t lwip_sleep = sys_timeouts_sleeptime();
     if (lwip_sleep < sleep_ms) {
         sleep_ms = lwip_sleep;
