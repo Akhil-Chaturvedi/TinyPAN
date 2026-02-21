@@ -290,6 +290,13 @@ void supervisor_on_l2cap_event(int event, int status) {
         case HAL_L2CAP_EVENT_DISCONNECTED:
             TINYPAN_LOG_INFO("L2CAP disconnected");
             bnep_on_l2cap_disconnected();
+
+#if TINYPAN_ENABLE_LWIP
+            /* Flush the TX queue to prevent stale packets (e.g. earlier TCP segments
+               or DHCP frames) from being transmitted if auto-reconnect establishes
+               a new session before the application layer timeouts occur. */
+            tinypan_netif_flush_queue();
+#endif
             
             if (s_state == TINYPAN_STATE_ONLINE || 
                 s_state == TINYPAN_STATE_DHCP ||
