@@ -183,35 +183,6 @@ void hal_get_local_bd_addr(uint8_t addr[HAL_BD_ADDR_LEN]);
  */
 uint32_t hal_get_tick_ms(void);
 
-/* ============================================================================
- * Non-Volatile Storage Functions (Optional)
- * ============================================================================ */
-
-/**
- * @brief Load data from persistent storage
- * 
- * Used for storing bonding keys and configuration.
- * Implementing this is optional - return -1 if not supported.
- * 
- * @param key       String key to identify the data
- * @param buffer    Buffer to store the loaded data
- * @param max_len   Maximum number of bytes to load
- * @return Number of bytes loaded, or negative error code
- */
-int hal_nv_load(const char* key, uint8_t* buffer, uint16_t max_len);
-
-/**
- * @brief Save data to persistent storage
- * 
- * Used for storing bonding keys and configuration.
- * Implementing this is optional - return -1 if not supported.
- * 
- * @param key   String key to identify the data
- * @param data  Pointer to data to save
- * @param len   Length of data to save
- * @return 0 on success, negative error code on failure
- */
-int hal_nv_save(const char* key, const uint8_t* data, uint16_t len);
 
 #ifdef __cplusplus
 }

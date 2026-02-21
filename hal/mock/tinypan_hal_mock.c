@@ -261,22 +261,6 @@ uint32_t hal_get_tick_ms(void) {
 #endif
 }
 
-int hal_nv_load(const char* key, uint8_t* buffer, uint16_t max_len) {
-    (void)key;
-    (void)buffer;
-    (void)max_len;
-    /* Not implemented in mock */
-    return -1;
-}
-
-int hal_nv_save(const char* key, const uint8_t* data, uint16_t len) {
-    (void)key;
-    (void)data;
-    (void)len;
-    /* Not implemented in mock */
-    return -1;
-}
-
 const uint8_t* mock_hal_get_last_tx_data(void) {
     return s_last_tx_data;
 }
