@@ -47,8 +47,14 @@
  * Maximum number of frames in the TX queue before dropping.
  * Due to the ring buffer design, this must be one larger than the 
  * actual number of frames you want to buffer (e.g., 16 slots holds 15 frames).
- * An ESP32 pulling a fast TCP stream can easily burst >7 frames quickly,
- * so 16 is recommended for lwIP setups with large TCP windows.
+ * 
+ * **Performance Tuning (TCP Window vs BLE Latency)**
+ * If the MCU opens a TCP connection and blasts data, lwIP might generate a burst 
+ * of packets faster than Bluetooth can transmit due to high latency. If this queue 
+ * fills, TinyPAN returns ERR_MEM to lwIP. TCP congestion control natively handles
+ * this backoff, but excessively small queues can lead to low throughput due to 
+ * excessive retransmissions. Tune this value relative to your lwIP TCP Window Size 
+ * and available RAM. 16 is recommended for lwIP setups with large TCP windows.
  */
 #ifndef TINYPAN_TX_QUEUE_LEN
 #define TINYPAN_TX_QUEUE_LEN                16
