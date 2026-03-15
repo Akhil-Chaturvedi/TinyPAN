@@ -1,8 +1,8 @@
 /*
  * TinyPAN lwIP Network Interface Adapter - Implementation
  * 
- * Bridges the BNEP layer to lwIP's netif interface.
- * This makes TinyPAN appear as an Ethernet interface to lwIP.
+ * Registers the lwIP netif (tp0) and delegates packet output/input
+ * to the active transport backend via tinypan_transport_get().
  */
 
 #include "tinypan_lwip_netif.h"

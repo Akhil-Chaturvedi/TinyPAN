@@ -32,8 +32,9 @@
 /**
  * Size of the receive ring buffer (bytes).
  * In SLIP mode (TINYPAN_USE_BLE_SLIP=1), incoming BLE UART bytes are queued
- * here until lwIP's slipif drains them via sio_read(). Must be large enough
- * to hold at least one full MTU-sized SLIP frame. Unused in BNEP mode.
+ * in the SLIP transport backend (tinypan_slip_transport.c) until lwIP's
+ * slipif drains them via sio_read(). Must be large enough to hold at least
+ * one full MTU-sized SLIP frame. Unused in BNEP mode.
  */
 #ifndef TINYPAN_RX_BUFFER_SIZE
 #define TINYPAN_RX_BUFFER_SIZE          1700

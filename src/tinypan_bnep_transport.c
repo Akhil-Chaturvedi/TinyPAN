@@ -1,5 +1,8 @@
 /*
  * TinyPAN BNEP Transport Backend
+ *
+ * Implements tinypan_transport_t for Bluetooth Classic BNEP mode.
+ * Only compiled when TINYPAN_USE_BLE_SLIP is 0.
  */
 
 #include "tinypan_transport.h"

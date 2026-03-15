@@ -16,11 +16,17 @@ For BLE-only microcontrollers (e.g., nRF52, ESP32-C3/S3, STM32WB) that lack a Cl
 *   **Protocol:** lwIP -> SLIP framing -> BLE UART characteristic (e.g., Nordic UART Service).
 *   **Phone side:** Requires a companion app that reads SLIP frames from the BLE pipe and injects the contained IPv4 packets into the OS networking stack via `VpnService` (Android) or `NetworkExtension` (iOS).
 
+### Transport Abstraction
+
+Mode selection at compile time determines which transport backend is compiled in, but the core modules (`tinypan_supervisor.c`, `tinypan_lwip_netif.c`) are transport-agnostic at the source level. Each backend implements the `tinypan_transport_t` interface defined in `src/tinypan_transport.h`. This interface consists of function pointers for initialization, connection events, incoming data dispatch, TX queue management, and lwIP output. `tinypan_transport_get()` returns the active backend.
+
 ## Memory Footprint (BNEP Native Mode)
 
 The library targets constrained embedded platforms and avoids heap allocation. The TX path checks whether the radio is ready, the queue is empty, and the outgoing pbuf is a single contiguous segment. If all three conditions hold, it manipulates the original `pbuf` in-place: strips the Ethernet header via `pbuf_remove_header`, claims BNEP headroom via `pbuf_add_header`, writes the BNEP header, sends to the HAL, and reverts the pbuf before returning to lwIP. This fast path allocates zero memory and copies zero bytes.
 
-If any condition fails (radio busy, queue non-empty, or chained pbuf), the pbuf is cloned into a contiguous `PBUF_RAM` block, encapsulated with the BNEP header, and placed into an internal TX queue (ring buffer, default 16 slots). Queued frames are drained automatically when the radio signals readiness via `HAL_L2CAP_EVENT_CAN_SEND_NOW`. In BLE SLIP mode, the queue holds raw escaped SLIP packets to survive radio latency, and an internal 1700-byte `s_rx_queue` buffer absorbs the byte stream.
+If any condition fails (radio busy, queue non-empty, or chained pbuf), the pbuf is cloned into a contiguous `PBUF_RAM` block, encapsulated with the BNEP header, and placed into an internal TX queue (ring buffer, default 16 slots). Queued frames are drained automatically when the radio signals readiness via `HAL_L2CAP_EVENT_CAN_SEND_NOW`.
+
+In SLIP mode, the SLIP transport backend owns a 1700-byte `s_rx_queue` ring buffer to absorb the incoming BLE byte stream. Outgoing packets are queued as raw escaped SLIP bytes before being sent to the HAL.
 
 The core loop is a single-threaded polling pump driven by `tinypan_process()`. For power-sensitive applications, `tinypan_get_next_timeout_ms()` returns the exact number of milliseconds until the next scheduled event (state machine timeout or lwIP timer), allowing the MCU to enter WFI instead of polling.
 
@@ -36,20 +42,25 @@ TinyPAN/
 ├── CMakeLists.txt           # Build configuration (fetches lwIP via FetchContent)
 ├── include/
 │   ├── tinypan.h            # Public API
-│   ├── tinypan_config.h     # Compile-time configuration (timeouts, queue sizes, mode select)
+│   ├── tinypan_config.h     # Compile-time configuration (timeouts, queue sizes)
 │   ├── tinypan_hal.h        # Hardware Abstraction Layer interface
 │   ├── lwipopts.h           # lwIP configuration overrides
 │   └── arch/                # lwIP architecture port (cc.h)
 ├── src/
-│   ├── tinypan.c            # Initialization, event routing, timeout bridge
+│   ├── tinypan.c            # Initialization, event routing, transport dispatch
 │   ├── tinypan_bnep.c       # BNEP protocol: frame building, parsing, state machine
 │   ├── tinypan_supervisor.c # Connection supervisor (IDLE -> CONNECTING -> DHCP -> ONLINE)
-│   ├── tinypan_lwip_netif.c # lwIP netif driver (TX queue, SLIP/BNEP routing, pbuf handling)
+│   ├── tinypan_lwip_netif.c # lwIP netif driver (delegates TX/RX to active transport)
+│   ├── tinypan_transport.h  # Transport interface definition (tinypan_transport_t)
+│   ├── tinypan_transport.c  # Transport factory (returns active backend via tinypan_transport_get)
+│   ├── tinypan_bnep_transport.c   # BNEP transport backend
+│   ├── tinypan_slip_transport.c   # SLIP transport backend
 │   └── tinypan_internal.h   # Internal cross-module prototypes
 ├── ports/
 │   ├── esp32_classic/       # Reference HAL for ESP-IDF (Bluedroid, BT Classic)
 │   └── zephyr_ble/          # Reference HAL for Zephyr RTOS (NUS, BLE SLIP)
 ├── tools/
+│   ├── tinypan_diag.c       # Optional diagnostic module (link state, IP info)
 │   ├── slip_simulator.py    # Python script simulating a SLIP MCU over TCP
 │   ├── slip_client.py       # Python script decoding SLIP stream (companion app mock)
 │   └── flutter_slip_blueprint.dart # Dart SLIP decoder for Flutter companion app
@@ -66,12 +77,12 @@ TinyPAN/
 
 To run TinyPAN on real hardware, implement the functions declared in `tinypan_hal.h`:
 
-1. **`hal_get_tick_ms()`** -- Return a monotonic millisecond counter (e.g., `xTaskGetTickCount() * portTICK_PERIOD_MS` on FreeRTOS, `k_uptime_get()` on Zephyr).
-2. **`hal_bt_l2cap_send(data, len)`** -- Transmit a contiguous buffer over the Bluetooth channel. In BNEP mode this carries a BNEP header + payload over Classic L2CAP (PSM 0x000F). In SLIP mode this carries raw SLIP-escaped bytes over a BLE characteristic.
-3. **`hal_bt_l2cap_connect(addr, psm, local_mtu)`** -- Initiate a connection. For BNEP, `local_mtu` should be at least 1691. For BLE SLIP, this may be a no-op if the MCU acts as a peripheral waiting for the phone to connect.
-4. **`hal_bt_l2cap_can_send()`** -- Return whether the channel can accept a new frame.
-5. **`hal_bt_l2cap_request_can_send_now()`** -- Request a `HAL_L2CAP_EVENT_CAN_SEND_NOW` callback when the channel becomes writable.
-6. **Receive path** -- When the Bluetooth stack receives data, call the registered receive callback (see `hal_bt_l2cap_register_recv_callback`). In BNEP mode this delivers raw L2CAP frames. In SLIP mode this delivers raw BLE UART bytes.
+1.  **`hal_get_tick_ms()`** -- Return a monotonic millisecond counter (e.g., `xTaskGetTickCount() * portTICK_PERIOD_MS` on FreeRTOS, `k_uptime_get()` on Zephyr).
+2.  **`hal_bt_l2cap_send(data, len)`** -- Transmit a contiguous buffer over the Bluetooth channel. In BNEP mode this carries a BNEP header + payload over Classic L2CAP (PSM 0x000F). In SLIP mode this carries raw SLIP-escaped bytes over a BLE characteristic.
+3.  **`hal_bt_l2cap_connect(addr, psm, local_mtu)`** -- Initiate a connection. For BNEP, `local_mtu` should be at least 1691. For BLE SLIP, this may be a no-op if the MCU acts as a peripheral waiting for the phone to connect.
+4.  **`hal_bt_l2cap_can_send()`** -- Return whether the channel can accept a new frame.
+5.  **`hal_bt_l2cap_request_can_send_now()`** -- Request a `HAL_L2CAP_EVENT_CAN_SEND_NOW` callback when the channel becomes writable.
+6.  **Receive path** -- When the Bluetooth stack receives data, call the registered receive callback (see `hal_bt_l2cap_register_recv_callback`). In BNEP mode this delivers raw L2CAP frames. In SLIP mode this delivers raw BLE UART bytes.
 
 Reference implementations are provided in `ports/`:
 *   `ports/esp32_classic/` -- ESP-IDF (Bluedroid) for Bluetooth Classic / BNEP mode.
