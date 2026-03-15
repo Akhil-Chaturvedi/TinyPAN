@@ -22,6 +22,7 @@
 #include "tinypan_config.h"
 #if TINYPAN_USE_BLE_SLIP
 #define LWIP_HAVE_SLIPIF            1
+#define SLIP_RX_FROM_ISR            1
 #else
 #define LWIP_HAVE_SLIPIF            0
 #endif

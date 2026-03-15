@@ -57,6 +57,9 @@ endif()
 set(TINYPAN_SOURCES
     src/tinypan.c
     src/tinypan_bnep.c
+    src/tinypan_transport.c
+    src/tinypan_bnep_transport.c
+    src/tinypan_slip_transport.c
     src/tinypan_supervisor.c
 )
 

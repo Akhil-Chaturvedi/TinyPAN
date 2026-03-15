@@ -5,6 +5,7 @@
  */
 
 #include "tinypan_supervisor.h"
+#include "tinypan_transport.h"
 #include "tinypan_bnep.h"
 #include "../include/tinypan_config.h"
 #include "../include/tinypan_hal.h"
@@ -106,12 +107,6 @@ void supervisor_init(const tinypan_config_t* config) {
     s_setup_retries = 0;
     s_initialized = true;
     
-    /* Set addresses for BNEP layer */
-    uint8_t local_addr[6];
-    hal_get_local_bd_addr(local_addr);
-    bnep_set_local_addr(local_addr);
-    bnep_set_remote_addr(s_config.remote_addr);
-    
     TINYPAN_LOG_INFO("Supervisor initialized");
 }
 
@@ -149,7 +144,10 @@ void supervisor_stop(void) {
     
     if (s_state != TINYPAN_STATE_IDLE) {
         hal_bt_l2cap_disconnect();
-        bnep_reset();
+        const tinypan_transport_t* transport = tinypan_transport_get();
+        if (transport && transport->on_disconnected) {
+            transport->on_disconnected();
+        }
     }
     
     set_state(TINYPAN_STATE_IDLE);
@@ -183,24 +181,22 @@ void supervisor_process(void) {
             break;
             
         case TINYPAN_STATE_BNEP_SETUP:
-#if TINYPAN_USE_BLE_SLIP
-            /* In SLIP mode, there is no BNEP setup. We transition immediately. */
-            TINYPAN_LOG_INFO("SLIP Mode: BNEP setup skipped. Transitioning to DHCP.");
-            set_state(TINYPAN_STATE_DHCP);
-#else
             /* Check for timeout */
             if (timeout_elapsed(TINYPAN_BNEP_SETUP_TIMEOUT_MS)) {
-                TINYPAN_LOG_WARN("BNEP setup timeout");
+                TINYPAN_LOG_WARN("Transport setup timeout");
                 
                 s_setup_retries++;
                 if (s_setup_retries < TINYPAN_BNEP_SETUP_RETRIES) {
                     /* Retry setup request */
-                    TINYPAN_LOG_INFO("Retrying BNEP setup (attempt %u)", s_setup_retries + 1);
+                    TINYPAN_LOG_INFO("Retrying Transport setup (attempt %u)", s_setup_retries + 1);
                     s_state_enter_time = hal_get_tick_ms();
-                    bnep_send_setup_request();
+                    const tinypan_transport_t* transport = tinypan_transport_get();
+                    if (transport && transport->retry_setup) {
+                        transport->retry_setup();
+                    }
                 } else {
                     /* Give up */
-                    TINYPAN_LOG_ERROR("BNEP setup failed after %u retries", TINYPAN_BNEP_SETUP_RETRIES);
+                    TINYPAN_LOG_ERROR("Transport setup failed after %u retries", TINYPAN_BNEP_SETUP_RETRIES);
                     hal_bt_l2cap_disconnect();
                     
 #if TINYPAN_ENABLE_AUTO_RECONNECT
@@ -211,7 +207,6 @@ void supervisor_process(void) {
 #endif
                 }
             }
-#endif
             break;
             
         case TINYPAN_STATE_DHCP:
@@ -293,25 +288,31 @@ void supervisor_on_l2cap_event(int event, int status) {
         case HAL_L2CAP_EVENT_CONNECTED:
             TINYPAN_LOG_INFO("L2CAP connected");
             if (s_state == TINYPAN_STATE_CONNECTING) {
-#if TINYPAN_USE_BLE_SLIP
-                /* SLIP mode skips BNEP. Assume layer 2 is up. */
-                set_state(TINYPAN_STATE_DHCP);
-#else
-                set_state(TINYPAN_STATE_BNEP_SETUP);
-                s_setup_retries = 0;
-                bnep_on_l2cap_connected();
-#endif
+                const tinypan_transport_t* transport = tinypan_transport_get();
+                if (transport && transport->on_connected) {
+                    transport->on_connected();
+                }
+                
+                if (transport && transport->requires_setup) {
+                    set_state(TINYPAN_STATE_BNEP_SETUP);
+                    s_setup_retries = 0;
+                } else {
+                    set_state(TINYPAN_STATE_DHCP);
+                }
             }
             break;
             
         case HAL_L2CAP_EVENT_DISCONNECTED:
             TINYPAN_LOG_INFO("L2CAP disconnected");
-            bnep_on_l2cap_disconnected();
+            {
+                const tinypan_transport_t* transport = tinypan_transport_get();
+                if (transport && transport->on_disconnected) {
+                    transport->on_disconnected();
+                }
+            }
 
 #if TINYPAN_ENABLE_LWIP
-            /* Flush the TX queue to prevent stale packets (e.g. earlier TCP segments
-               or DHCP frames) from being transmitted if auto-reconnect establishes
-               a new session before the application layer timeouts occur. */
+            /* Flush the TX queue to prevent stale packets */
             tinypan_netif_flush_queue();
 #endif
             
@@ -349,15 +350,15 @@ void supervisor_on_l2cap_event(int event, int status) {
         case HAL_L2CAP_EVENT_CAN_SEND_NOW:
             TINYPAN_LOG_DEBUG("L2CAP can send now (flushing queues)");
             
-            /* If we were stalled sending the setup request, try again now */
-            if (s_state == TINYPAN_STATE_BNEP_SETUP) {
-                if (bnep_get_state() == BNEP_STATE_WAIT_FOR_CONNECTION_RESPONSE) {
-                    bnep_send_setup_request();
+            {
+                const tinypan_transport_t* transport = tinypan_transport_get();
+                if (transport && transport->on_can_send_now) {
+                    transport->on_can_send_now();
                 }
             }
             
 #if TINYPAN_ENABLE_LWIP
-            tinypan_netif_drain_tx_queue();
+            /* Any global queue draining */
 #endif
             break;
             
@@ -368,16 +369,11 @@ void supervisor_on_l2cap_event(int event, int status) {
 }
 
 void supervisor_on_bnep_connected(void) {
-    TINYPAN_LOG_INFO("BNEP connected");
+    TINYPAN_LOG_INFO("Transport connected");
     
     /* Reset reconnect state on successful connection */
     s_reconnect_delay_ms = 0;
     s_reconnect_attempts = 0;
-}
-
-void supervisor_on_bnep_disconnected(void) {
-    TINYPAN_LOG_INFO("BNEP disconnected");
-    /* Handled by L2CAP disconnect */
 }
 
 void supervisor_on_bnep_setup_response(uint16_t response_code) {

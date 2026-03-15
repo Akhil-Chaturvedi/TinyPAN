@@ -14,6 +14,8 @@ extern "C" {
  */
 void tinypan_internal_set_ip(uint32_t ip, uint32_t netmask, uint32_t gw, uint32_t dns);
 
+const tinypan_config_t* tinypan_internal_get_config(void);
+
 /**
  * @brief Returns the exact number of milliseconds until the next supervisor state timeout.
  */

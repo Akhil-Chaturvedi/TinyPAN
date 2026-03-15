@@ -6,7 +6,7 @@
 
 #include "../include/tinypan.h"
 #include "../include/tinypan_hal.h"
-#include "tinypan_bnep.h"
+#include "tinypan_transport.h"
 #include "tinypan_supervisor.h"
 #include "tinypan_internal.h"
 #include <string.h>
@@ -35,21 +35,14 @@ static bool s_has_ip = false;
  * ============================================================================ */
 
 /**
- * @brief L2CAP receive callback - passes data to BNEP layer
+ * @brief L2CAP receive callback - routes to the active transport backend
  */
 static void l2cap_recv_callback(const uint8_t* data, uint16_t len, void* user_data) {
     (void)user_data;
-#if TINYPAN_USE_BLE_SLIP
-#if TINYPAN_ENABLE_LWIP
-    /* In BLE SLIP mode, the BLE UART stream comes in here. Route raw bytes directly to the SLIP netif queue. */
-    tinypan_netif_input(NULL, NULL, 0, data, len);
-#else
-    /* No lwIP: frame is received but has nowhere to go */
-#endif
-#else
-    /* Native mode: parse BNEP headers */
-    bnep_handle_incoming(data, len);
-#endif
+    const tinypan_transport_t* transport = tinypan_transport_get();
+    if (transport && transport->handle_incoming) {
+        transport->handle_incoming(data, len);
+    }
 }
 
 /**
@@ -58,37 +51,6 @@ static void l2cap_recv_callback(const uint8_t* data, uint16_t len, void* user_da
 static void l2cap_event_callback(hal_l2cap_event_t event, int status, void* user_data) {
     (void)user_data;
     supervisor_on_l2cap_event((int)event, status);
-}
-
-/**
- * @brief BNEP setup response callback - passes to supervisor
- */
-static void bnep_setup_response_callback(uint16_t response_code, void* user_data) {
-    (void)user_data;
-    supervisor_on_bnep_setup_response(response_code);
-}
-
-/**
- * @brief BNEP frame receive callback - routes frames into lwIP
- */
-static void bnep_frame_callback(const bnep_ethernet_frame_t* frame, void* user_data) {
-    (void)user_data;
-    
-    TINYPAN_LOG_DEBUG("Received frame: type=0x%04X len=%u",
-                       frame->ethertype, frame->payload_len);
-    
-#if TINYPAN_ENABLE_LWIP
-    if (frame == NULL) {
-        return;
-    }
-
-    /* Pass the raw pointers directly to lwIP; the netif layer
-       copies them into a pbuf for stack processing */
-    tinypan_netif_input(frame->dst_addr, frame->src_addr, frame->ethertype,
-                        frame->payload, frame->payload_len);
-#else
-    /* No lwIP: frame is received but has nowhere to go */
-#endif
 }
 
 /* ============================================================================
@@ -148,10 +110,15 @@ tinypan_error_t tinypan_init(const tinypan_config_t* config) {
     hal_bt_l2cap_register_recv_callback(l2cap_recv_callback, NULL);
     hal_bt_l2cap_register_event_callback(l2cap_event_callback, NULL);
     
-    /* Initialize BNEP layer */
-    bnep_init();
-    bnep_register_frame_callback(bnep_frame_callback, NULL);
-    bnep_register_setup_response_callback(bnep_setup_response_callback, NULL);
+    /* Initialize active transport */
+    const tinypan_transport_t* transport = tinypan_transport_get();
+    if (transport && transport->init) {
+        if (transport->init() < 0) {
+            TINYPAN_LOG_ERROR("Failed to initialize transport %s", transport->name);
+            hal_bt_deinit();
+            return TINYPAN_ERR_HAL_FAILED;
+        }
+    }
     
     /* Initialize supervisor */
     supervisor_init(config);
@@ -363,4 +330,8 @@ void tinypan_internal_clear_ip(void) {
     }
 
     dispatch_event(TINYPAN_EVENT_IP_LOST);
+}
+
+const tinypan_config_t* tinypan_internal_get_config(void) {
+    return &s_config;
 }
