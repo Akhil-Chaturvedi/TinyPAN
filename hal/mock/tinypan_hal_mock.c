@@ -35,9 +35,11 @@ static void* s_event_callback_user_data = NULL;
 static bool s_use_mock_time = false;
 static uint32_t s_mock_tick_ms = 0;
 
-/* Last TX buffer capture for test inspection */
-static uint8_t s_last_tx_data[1500] = {0};
-static uint16_t s_last_tx_len = 0;
+/* Last TX buffer capture for test inspection (history ring buffer) */
+#define MOCK_TX_HISTORY_LEN 5
+static uint8_t s_tx_history_data[MOCK_TX_HISTORY_LEN][1500] = {0};
+static uint16_t s_tx_history_len[MOCK_TX_HISTORY_LEN] = {0};
+static int s_tx_history_head = 0;
 
 /* ============================================================================
  * Mock Control API (for testing)
@@ -187,40 +189,36 @@ void hal_bt_l2cap_disconnect(void) {
 }
 
 int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
-    if (!s_initialized) {
-        return -1;
-    }
-    
-    if (!s_connected) {
-        TINYPAN_LOG_WARN("[MOCK] Cannot send: not connected");
-        return -1;
-    }
+    if (!s_initialized || !s_connected) return -1;
+    if (data == NULL || len == 0) return -1;
     
     if (!s_can_send) {
-        TINYPAN_LOG_DEBUG("[MOCK] Cannot send now");
-        return 1;  /* Busy */
+        return 1; /* WOULD BLOCK */
     }
     
     TINYPAN_LOG_DEBUG("[MOCK] Sending %u bytes:", len);
     
-    if (len <= sizeof(s_last_tx_data)) {
-        if (data != NULL && len > 0) {
-            memcpy(s_last_tx_data, data, len);
-        }
-        s_last_tx_len = len;
+    /* Store in history */
+    s_tx_history_head = (s_tx_history_head + 1) % MOCK_TX_HISTORY_LEN;
+    s_tx_history_len[s_tx_history_head] = len;
+    uint8_t* history_buf = s_tx_history_data[s_tx_history_head];
+    
+    if (len <= 1500) {
+        memcpy(history_buf, data, len);
     }
     
-    /* Print hex dump for debugging */
-    #if TINYPAN_ENABLE_DEBUG
-    char hex_buf[256];
-    int pos = 0;
-    for (uint16_t i = 0; i < len && pos < 240; i++) {
-        pos += snprintf(hex_buf + pos, sizeof(hex_buf) - pos, "%02X ", s_last_tx_data[i]);
-    }
-    TINYPAN_LOG_DEBUG("[MOCK] TX: %s", hex_buf);
-    #endif
+    /* Print first 32 hex bytes for debug */
+    char hex[128] = {0};
+    int hex_len = 0;
+    uint16_t print_len = (len > 32) ? 32 : len;
     
-    return 0;
+    for (uint16_t i = 0; i < print_len; i++) {
+        hex_len += snprintf(hex + hex_len, sizeof(hex) - hex_len, "%02X ", data[i]);
+    }
+    
+    TINYPAN_LOG_DEBUG("[MOCK] TX: %s", hex);
+    
+    return 0; /* Success */
 }
 
 bool hal_bt_l2cap_can_send(void) {
@@ -262,9 +260,23 @@ uint32_t hal_get_tick_ms(void) {
 }
 
 const uint8_t* mock_hal_get_last_tx_data(void) {
-    return s_last_tx_data;
+    return s_tx_history_data[s_tx_history_head];
 }
 
 uint16_t mock_hal_get_last_tx_len(void) {
-    return s_last_tx_len;
+    return s_tx_history_len[s_tx_history_head];
+}
+
+const uint8_t* mock_hal_get_tx_history_data(int index_from_newest) {
+    if (index_from_newest >= MOCK_TX_HISTORY_LEN || index_from_newest < 0) return NULL;
+    int idx = s_tx_history_head - index_from_newest;
+    if (idx < 0) idx += MOCK_TX_HISTORY_LEN;
+    return s_tx_history_data[idx];
+}
+
+uint16_t mock_hal_get_tx_history_len(int index_from_newest) {
+    if (index_from_newest >= MOCK_TX_HISTORY_LEN || index_from_newest < 0) return 0;
+    int idx = s_tx_history_head - index_from_newest;
+    if (idx < 0) idx += MOCK_TX_HISTORY_LEN;
+    return s_tx_history_len[idx];
 }

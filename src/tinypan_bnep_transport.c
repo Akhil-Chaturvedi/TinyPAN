@@ -153,6 +153,11 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
                         (p->next == NULL);
                         
     if (can_send_now) {
+        
+#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
+        if (pbuf_remove_header(p, ETH_PAD_SIZE) != 0) return ERR_ARG;
+#endif
+
         uint8_t* eth_hdr = (uint8_t*)p->payload;
         uint8_t dst_addr[6], src_addr[6];
         memcpy(dst_addr, &eth_hdr[0], 6);
@@ -189,12 +194,19 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
         }
         pbuf_remove_header(p, header_len);
         pbuf_add_header(p, 14);
+#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
+        pbuf_add_header(p, ETH_PAD_SIZE);
+#endif
         return ERR_OK;
     }
     
     struct pbuf* q = pbuf_alloc(PBUF_LINK, p->tot_len, PBUF_RAM);
     if (q == NULL) return ERR_MEM;
     if (pbuf_copy(q, p) != ERR_OK) { pbuf_free(q); return ERR_MEM; }
+    
+#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
+    if (pbuf_remove_header(q, ETH_PAD_SIZE) != 0) { pbuf_free(q); return ERR_ARG; }
+#endif
     
     uint8_t* eth_hdr = (uint8_t*)q->payload;
     uint8_t dst_addr[6], src_addr[6];

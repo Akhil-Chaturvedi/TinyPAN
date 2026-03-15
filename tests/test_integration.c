@@ -108,12 +108,42 @@ int main(void) {
     }
     printf("\n");
     
-    /* Simulate BNEP setup */
-    printf("[Step 4] Phone Accepts BNEP Setup\n");
+    /* Simulate BNEP setup (and the subsequent Multicast filter request) */
+    printf("[Step 4] Phone Accepts BNEP Setup & Multicast Filter\n");
     mock_hal_simulate_bnep_setup_success();
     tinypan_process();
+    
+    /* We expect TinyPAN to immediately send the BNEP Multicast Filter SET request */
+    extern const uint8_t* mock_hal_get_tx_history_data(int);
+    extern uint16_t mock_hal_get_tx_history_len(int);
+    
+    bool found_filter_req = false;
+    for (int i = 0; i < 5; i++) {
+        const uint8_t* tx_data = mock_hal_get_tx_history_data(i);
+        uint16_t tx_len = mock_hal_get_tx_history_len(i);
+        
+        if (tx_len == 16 && tx_data && 
+            tx_data[0] == BNEP_PKT_TYPE_CONTROL && 
+            tx_data[1] == BNEP_CTRL_FILTER_MULTI_ADDR_SET) {
+            found_filter_req = true;
+            break;
+        }
+    }
+    
+    if (!found_filter_req) {
+        printf("    FAILED: Expected Multicast Filter Request (len 16) in recent TX history, but not found.\n");
+        tinypan_deinit();
+        return 1;
+    }
+    printf("    OK: TinyPAN sent Multicast Filter request.\n");
+    
+    /* Simulate NAP accepting the filter request */
+    uint8_t filter_resp[4] = { BNEP_PKT_TYPE_CONTROL, BNEP_CTRL_FILTER_MULTI_ADDR_RESPONSE, 0x00, 0x00 };
+    mock_hal_simulate_receive(filter_resp, sizeof(filter_resp));
+    tinypan_process();
+
     if (tinypan_get_state() != TINYPAN_STATE_DHCP) {
-        printf("    FAILED: Expected DHCP\n");
+        printf("    FAILED: Expected DHCP (state = %d)\n", tinypan_get_state());
         tinypan_deinit();
         return 1;
     }
@@ -179,72 +209,77 @@ int main(void) {
         tinypan_process();
         
         if (!offer_sent || !ack_sent) {
-            extern const uint8_t* mock_hal_get_last_tx_data(void);
-            extern uint16_t mock_hal_get_last_tx_len(void);
+            extern const uint8_t* mock_hal_get_tx_history_data(int);
+            extern uint16_t mock_hal_get_tx_history_len(int);
             
-            const uint8_t* tx_data = mock_hal_get_last_tx_data();
-            uint16_t tx_len = mock_hal_get_last_tx_len();
-            
-            uint32_t xid = 0;
-            uint8_t client_mac[6] = {0x12, 0x22, 0x33, 0x44, 0x55, 0x66};
-            if (!offer_sent && dhcp_sim_is_discover(tx_data, tx_len, &xid, NULL)) {
-                printf("[Step 5b] Intercepted lwIP DHCP DISCOVER (XID: 0x%08X)\n", xid);
-                printf("[Step 5c] Automatically generating and injecting NAP DHCP OFFER response...\n");
+            for (int i = 0; i < 5; i++) {
+                const uint8_t* tx_data = mock_hal_get_tx_history_data(i);
+                uint16_t tx_len = mock_hal_get_tx_history_len(i);
+                if (!tx_data || tx_len == 0) continue;
                 
-                uint8_t dhcp_offer[512];
-                int offer_len = dhcp_sim_build_offer(dhcp_offer, sizeof(dhcp_offer),
+                uint32_t xid = 0;
+                uint8_t client_mac[6] = {0x12, 0x22, 0x33, 0x44, 0x55, 0x66};
+                
+                if (!offer_sent && dhcp_sim_is_discover(tx_data, tx_len, &xid, NULL)) {
+                    printf("[Step 5b] Intercepted lwIP DHCP DISCOVER (XID: 0x%08X)\n", xid);
+                    printf("[Step 5c] Automatically generating and injecting NAP DHCP OFFER response...\n");
+                    
+                    uint8_t dhcp_offer[512];
+                    int offer_len = dhcp_sim_build_offer(dhcp_offer, sizeof(dhcp_offer),
+                                                          &g_dhcp_config, xid, client_mac);
+                    
+                    uint8_t broadcast[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+                    uint8_t full_packet[1024];
+                    int pkt_len = dhcp_sim_build_bnep_packet(
+                        full_packet, sizeof(full_packet),
+                        g_dhcp_config.server_mac, broadcast,
+                        g_dhcp_config.server_ip, 0xFFFFFFFF,
+                        dhcp_offer, (uint16_t)offer_len
+                    );
+                    
+                    extern void tinypan_netif_input(const uint8_t* dst, const uint8_t* src, uint16_t ethertype, const uint8_t* payload, uint16_t payload_len);
+                    /* BNEP header is 15 bytes. Payload starts at 15. The packet length includes the 15-byte BNEP header. */
+                    tinypan_netif_input(full_packet + 1, full_packet + 7, ((uint16_t)full_packet[13] << 8) | full_packet[14], full_packet + 15, pkt_len - 15);
+                    offer_sent = true;
+                    
+                    printf("[Step 5c] Injected OFFER Packet Hex (%d bytes):\n", pkt_len);
+                    for (int j = 0; j < pkt_len; j++) {
+                        printf("%02X ", full_packet[j]);
+                        if ((j + 1) % 16 == 0) printf("\n");
+                    }
+                    printf("\n");
+                    
+                    /* Fast-forward a bit to give lwIP time to process the OFFER */
+                    extern void mock_hal_advance_tick_ms(uint32_t delta_ms);
+                    mock_hal_advance_tick_ms(50);
+                    break; /* Processed one packet, break the history loop */
+                    
+                } else if (offer_sent && !ack_sent && dhcp_sim_is_request(tx_data, tx_len, &xid)) {
+                    printf("[Step 5d] Intercepted lwIP DHCP REQUEST (XID: 0x%08X)\n", xid);
+                    printf("[Step 5e] Automatically generating and injecting NAP DHCP ACK response...\n");
+                    
+                    uint8_t dhcp_ack[512];
+                    int ack_len = dhcp_sim_build_ack(dhcp_ack, sizeof(dhcp_ack),
                                                       &g_dhcp_config, xid, client_mac);
-                
-                uint8_t broadcast[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-                uint8_t full_packet[1024];
-                int pkt_len = dhcp_sim_build_bnep_packet(
-                    full_packet, sizeof(full_packet),
-                    g_dhcp_config.server_mac, broadcast,
-                    g_dhcp_config.server_ip, 0xFFFFFFFF,
-                    dhcp_offer, (uint16_t)offer_len
-                );
-                
-                extern void tinypan_netif_input(const uint8_t* dst, const uint8_t* src, uint16_t ethertype, const uint8_t* payload, uint16_t payload_len);
-                tinypan_netif_input(full_packet + 1, full_packet + 7, ((uint16_t)full_packet[13] << 8) | full_packet[14], full_packet + 15, pkt_len - 15);
-                offer_sent = true;
-                
-                printf("[Step 5c] Injected OFFER Packet Hex (%d bytes):\n", pkt_len);
-                for (int i = 0; i < pkt_len; i++) {
-                    printf("%02X ", full_packet[i]);
-                    if ((i + 1) % 16 == 0) printf("\n");
+                    
+                    uint8_t broadcast[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+                    uint8_t full_packet[1024];
+                    int pkt_len = dhcp_sim_build_bnep_packet(
+                        full_packet, sizeof(full_packet),
+                        g_dhcp_config.server_mac, broadcast,
+                        g_dhcp_config.server_ip, 0xFFFFFFFF,
+                        dhcp_ack, (uint16_t)ack_len
+                    );
+                    
+                    extern void tinypan_netif_input(const uint8_t* dst, const uint8_t* src, uint16_t ethertype, const uint8_t* payload, uint16_t payload_len);
+                    tinypan_netif_input(full_packet + 1, full_packet + 7, ((uint16_t)full_packet[13] << 8) | full_packet[14], full_packet + 15, pkt_len - 15);
+                    ack_sent = true;
+                    
+                    /* Fast-forward to let lwIP process ACK and setup IP */
+                    extern void mock_hal_advance_tick_ms(uint32_t delta_ms);
+                    mock_hal_advance_tick_ms(50);
+                    break; /* Processed one packet, break the history loop */
                 }
-                printf("\n");
-                
-                /* Fast-forward a bit to give lwIP time to process the OFFER */
-                extern void mock_hal_advance_tick_ms(uint32_t delta_ms);
-                mock_hal_advance_tick_ms(50);
-                continue;
-                
-            } else if (offer_sent && !ack_sent && dhcp_sim_is_request(tx_data, tx_len, &xid)) {
-                printf("[Step 5d] Intercepted lwIP DHCP REQUEST (XID: 0x%08X)\n", xid);
-                printf("[Step 5e] Automatically generating and injecting NAP DHCP ACK response...\n");
-                
-                uint8_t dhcp_ack[512];
-                int ack_len = dhcp_sim_build_ack(dhcp_ack, sizeof(dhcp_ack),
-                                                  &g_dhcp_config, xid, client_mac);
-                
-                uint8_t broadcast[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-                uint8_t full_packet[1024];
-                int pkt_len = dhcp_sim_build_bnep_packet(
-                    full_packet, sizeof(full_packet),
-                    g_dhcp_config.server_mac, broadcast,
-                    g_dhcp_config.server_ip, 0xFFFFFFFF,
-                    dhcp_ack, (uint16_t)ack_len
-                );
-                
-                extern void tinypan_netif_input(const uint8_t* dst, const uint8_t* src, uint16_t ethertype, const uint8_t* payload, uint16_t payload_len);
-                tinypan_netif_input(full_packet + 1, full_packet + 7, ((uint16_t)full_packet[13] << 8) | full_packet[14], full_packet + 15, pkt_len - 15);
-                ack_sent = true;
-                
-                /* Fast-forward to let lwIP process ACK and setup IP */
-                extern void mock_hal_advance_tick_ms(uint32_t delta_ms);
-                mock_hal_advance_tick_ms(50);
-                continue;
             }
         }
         

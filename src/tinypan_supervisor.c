@@ -313,7 +313,13 @@ void supervisor_on_l2cap_event(int event, int status) {
 
 #if TINYPAN_ENABLE_LWIP
             /* Flush the TX queue to prevent stale packets */
-            tinypan_netif_flush_queue();
+            const tinypan_transport_t* transport_tx = tinypan_transport_get();
+            if (transport_tx && transport_tx->flush_queues) {
+                transport_tx->flush_queues();
+            }
+            
+            /* QA Round 16: Persistent IP Leases */
+            tinypan_netif_set_link(false);
 #endif
             
             if (s_state == TINYPAN_STATE_ONLINE || 

@@ -559,6 +559,27 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
                     
                     if (response.response_code == BNEP_SETUP_RESPONSE_SUCCESS) {
                         set_state(BNEP_STATE_CONNECTED);
+                        
+                        /* QA Round 16: Stop Broadcast Storms by filtering multicast to just Broadcast MAC */
+                        uint8_t filter_req[16] = {
+                            BNEP_PKT_TYPE_CONTROL,
+                            BNEP_CTRL_FILTER_MULTI_ADDR_SET,
+                            0x00, 0x0C, /* 12 bytes of filter payload */
+                            /* Start MAC: Broadcast */
+                            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                            /* End MAC: Broadcast */
+                            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+                        };
+                        int r = hal_bt_l2cap_send(filter_req, sizeof(filter_req));
+                        if (r > 0) {
+                            if (sizeof(filter_req) <= sizeof(s_pending_control_buf)) {
+                                memcpy(s_pending_control_buf, filter_req, sizeof(filter_req));
+                                s_pending_control_len = sizeof(filter_req);
+                            }
+                            hal_bt_l2cap_request_can_send_now();
+                        } else if (r < 0) {
+                            TINYPAN_LOG_ERROR("Failed to send multi addr filter");
+                        }
                     }
                     
                     if (s_setup_response_callback) {
@@ -600,6 +621,14 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
                     TINYPAN_LOG_ERROR("Failed to send filter response: %d", result);
                 }
             }
+            break;
+            
+        case BNEP_CTRL_FILTER_MULTI_ADDR_RESPONSE:
+            TINYPAN_LOG_INFO("BNEP Multicast Filter Set confirmed by NAP");
+            break;
+            
+        case BNEP_CTRL_FILTER_NET_TYPE_RESPONSE:
+            TINYPAN_LOG_INFO("BNEP NetType Filter Set confirmed by NAP");
             break;
             
         case BNEP_CTRL_COMMAND_NOT_UNDERSTOOD:

@@ -30,11 +30,11 @@
 #endif
 
 /**
- * Size of the receive ring buffer (bytes).
- * In SLIP mode (TINYPAN_USE_BLE_SLIP=1), incoming BLE UART bytes are queued
- * in the SLIP transport backend (tinypan_slip_transport.c) until lwIP's
- * slipif drains them via sio_read(). Must be large enough to hold at least
- * one full MTU-sized SLIP frame. Unused in BNEP mode.
+ * Size limit for a single incoming SLIP frame (bytes).
+ * The SLIP transport backend builds pbuf chains from raw incoming bytes
+ * using a streaming FSM; it does not use a static ring buffer.
+ * This define is retained for integrator reference but is not used
+ * internally. Unused in BNEP mode.
  */
 #ifndef TINYPAN_RX_BUFFER_SIZE
 #define TINYPAN_RX_BUFFER_SIZE          1700
@@ -46,19 +46,16 @@
 
 /**
  * Maximum number of frames in the TX queue before dropping.
- * Due to the ring buffer design, this must be one larger than the 
- * actual number of frames you want to buffer (e.g., 16 slots holds 15 frames).
- * 
- * **Performance Tuning (TCP Window vs BLE Latency)**
- * If the MCU opens a TCP connection and blasts data, lwIP might generate a burst 
- * of packets faster than Bluetooth can transmit due to high latency. If this queue 
- * fills, TinyPAN returns ERR_MEM to lwIP. TCP congestion control natively handles
- * this backoff, but excessively small queues can lead to low throughput due to 
- * excessive retransmissions. Tune this value relative to your lwIP TCP Window Size 
- * and available RAM. 16 is recommended for lwIP setups with large TCP windows.
+ * Due to the ring buffer design, the usable capacity is one less than
+ * this value (e.g., 3 slots hold up to 2 frames in flight).
+ *
+ * Tuning: TCP congestion control handles backpressure from ERR_MEM
+ * returns naturally, but very small queues with high BLE round-trip latency
+ * can reduce throughput through excessive retransmissions. 3 is the default
+ * to limit peak memory use during TCP burst scenarios on low-RAM targets.
  */
 #ifndef TINYPAN_TX_QUEUE_LEN
-#define TINYPAN_TX_QUEUE_LEN                16
+#define TINYPAN_TX_QUEUE_LEN                3
 #endif
 
 /* ============================================================================

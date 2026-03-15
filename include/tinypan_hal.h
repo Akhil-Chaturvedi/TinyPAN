@@ -110,27 +110,20 @@ void hal_bt_l2cap_disconnect(void);
 
 /**
  * @brief Send data over the L2CAP channel
- * 
+ *
  * Sends a single contiguous buffer over the Bluetooth channel.
  * In BNEP mode (TINYPAN_USE_BLE_SLIP=0), the buffer contains a BNEP header
  * followed by an IP payload. In SLIP mode (TINYPAN_USE_BLE_SLIP=1), the buffer
  * contains raw SLIP-escaped bytes.
- * 
- * **WARNING: UNALIGNED POINTERS**
- * The fast-path zero-copy transmit mechanism performs an in-place header swap,
- * which inherently shifts the start of the payload by 1 byte. As a result,
- * the `data` pointer passed to this function is **not** guaranteed to be
- * 32-bit aligned.
- * 
- * If your hardware DMA controller requires aligned source addresses (e.g. many
- * Cortex-M3/M0/M4 BLE SoCs), your typical `memcpy` or DMA setup will hard-fault.
- * The HAL implementation MUST cleanly bounce or pad this buffer if hardware 
- * strict alignment is required.
- * 
- * *Suggestion: Implementation should check `((uintptr_t)data & 3)` and bounce 
- * the buffer to an aligned block if required.*
- * 
- * @param data         Pointer to the BNEP frame (header + payload)
+ *
+ * The `data` pointer passed to this function will be 4-byte aligned when
+ * BNEP mode is active. `lwipopts.h` sets `ETH_PAD_SIZE = 1` so that the
+ * 1-byte pad inserted before the outgoing Ethernet header exactly cancels
+ * the net -1 byte shift produced by swapping the 14-byte Ethernet header
+ * with the 15-byte BNEP header in-place. HAL implementations do not need
+ * an alignment bounce for this reason.
+ *
+ * @param data         Pointer to the frame (BNEP or SLIP)
  * @param len          Total length of the frame
  * @return 0 on success, negative error code on failure, positive if busy (try again)
  */

@@ -18,15 +18,35 @@ For BLE-only microcontrollers (e.g., nRF52, ESP32-C3/S3, STM32WB) that lack a Cl
 
 ### Transport Abstraction
 
+# TinyPAN
+
+TinyPAN is a C library that implements a Bluetooth PAN (Personal Area Network) client for embedded systems. It provides two operating modes: native Bluetooth Classic tethering via BNEP, and BLE-based tethering via SLIP over a UART-style characteristic. Both modes bridge into the lwIP TCP/IP stack so the device can obtain an IP address via DHCP and communicate over IP.
+
+## Architecture: Dual-Mode Connectivity
+
+TinyPAN operates in two distinct modes depending on your hardware capabilities, configurable via `TINYPAN_USE_BLE_SLIP` in `tinypan_config.h`:
+
+### Mode A: Native Bluetooth Classic (BNEP)
+For microcontrollers with a Bluetooth Classic or Dual-Mode radio (e.g., ESP32, Raspberry Pi Pico W).
+*   **Protocol:** lwIP -> BNEP encapsulation -> BT Classic L2CAP.
+*   **Phone side:** Uses the built-in iOS/Android Personal Hotspot. No companion app required.
+
+### Mode B: BLE Companion App (SLIP)
+For BLE-only microcontrollers (e.g., nRF52, ESP32-C3/S3, STM32WB) that lack a Classic radio.
+*   **Protocol:** lwIP -> SLIP framing -> BLE UART characteristic (e.g., Nordic UART Service).
+*   **Phone side:** Requires a companion app that reads SLIP frames from the BLE pipe and injects the contained IPv4 packets into the OS networking stack via `VpnService` (Android) or `NetworkExtension` (iOS).
+
+### Transport Abstraction
+
 Mode selection at compile time determines which transport backend is compiled in, but the core modules (`tinypan_supervisor.c`, `tinypan_lwip_netif.c`) are transport-agnostic at the source level. Each backend implements the `tinypan_transport_t` interface defined in `src/tinypan_transport.h`. This interface consists of function pointers for initialization, connection events, incoming data dispatch, TX queue management, and lwIP output. `tinypan_transport_get()` returns the active backend.
 
 ## Memory Footprint (BNEP Native Mode)
 
 The library targets constrained embedded platforms and avoids heap allocation. The TX path checks whether the radio is ready, the queue is empty, and the outgoing pbuf is a single contiguous segment. If all three conditions hold, it manipulates the original `pbuf` in-place: strips the Ethernet header via `pbuf_remove_header`, claims BNEP headroom via `pbuf_add_header`, writes the BNEP header, sends to the HAL, and reverts the pbuf before returning to lwIP. This fast path allocates zero memory and copies zero bytes.
 
-If any condition fails (radio busy, queue non-empty, or chained pbuf), the pbuf is cloned into a contiguous `PBUF_RAM` block, encapsulated with the BNEP header, and placed into an internal TX queue (ring buffer, default 16 slots). Queued frames are drained automatically when the radio signals readiness via `HAL_L2CAP_EVENT_CAN_SEND_NOW`.
+If any condition fails (radio busy, queue non-empty, or chained pbuf), the pbuf is cloned into a contiguous `PBUF_RAM` block, encapsulated with the BNEP header, and placed into an internal TX queue (ring buffer, default 3 slots). Queued frames are drained automatically when the radio signals readiness via `HAL_L2CAP_EVENT_CAN_SEND_NOW`.
 
-In SLIP mode, the SLIP transport backend owns a 1700-byte `s_rx_queue` ring buffer to absorb the incoming BLE byte stream. Outgoing packets are queued as raw escaped SLIP bytes before being sent to the HAL.
+In SLIP mode, the SLIP transport backend parses incoming BLE bytes through a streaming SLIP FSM, building lwIP pbufs incrementally as bytes arrive. No intermediate ring buffer is used. When the SLIP `0xC0` END byte is received, the completed pbuf chain is dispatched directly to lwIP.
 
 The core loop is a single-threaded polling pump driven by `tinypan_process()`. For power-sensitive applications, `tinypan_get_next_timeout_ms()` returns the exact number of milliseconds until the next scheduled event (state machine timeout or lwIP timer), allowing the MCU to enter WFI instead of polling.
 
@@ -145,13 +165,13 @@ The suite includes:
 
 - **Single-threaded.** There is no internal synchronization. All calls to TinyPAN and all HAL callbacks must run in the same execution context. See the RTOS Threading section above.
 
-- **BNEP TX fast path (Mode A only).** When the radio is ready, the queue is empty, and the pbuf is contiguous (`p->next == NULL`), the netif manipulates the original `pbuf` in-place (strips 14-byte Ethernet header, adds 15-byte BNEP header, sends, reverts) without allocating or copying. Chained pbufs and busy-radio conditions fall through to the slow path which clones into `PBUF_RAM` before queuing. In SLIP mode (Mode B), `slipif_output` handles framing and the queue holds escaped SLIP bytes directly.
+- **BNEP TX fast path (Mode A only).** When the radio is ready, the queue is empty, and the pbuf is contiguous (`p->next == NULL`), the netif manipulates the original `pbuf` in-place (strips 14-byte Ethernet header, adds 15-byte BNEP header, sends, reverts) without allocating or copying. Chained pbufs and busy-radio conditions fall through to the slow path which clones into `PBUF_RAM` before queuing. In SLIP mode (Mode B), the SLIP transport writes directly to the HAL without a separate queue layer.
 
-  > **Note (BNEP mode only):** The in-place header swap shifts the buffer pointer by -1 byte (14 removed, 15 added). If the HAL's DMA requires 4-byte aligned source pointers, `hal_bt_l2cap_send` must bounce the buffer. Check alignment with `((uintptr_t)data & 3)`. The ESP-IDF reference port in `ports/esp32_classic/` demonstrates this.
+- **TX queue is bounded.** The queue holds up to `TINYPAN_TX_QUEUE_LEN` (default 3) packets. If the queue is full, the packet is dropped and `ERR_MEM` is returned to lwIP, which causes TCP to apply congestion backoff.
 
-- **TX queue is bounded.** The queue holds up to `TINYPAN_TX_QUEUE_LEN` (default 16) packets. If the queue is full, the packet is dropped and `ERR_MEM` is returned to lwIP.
+- **BNEP multicast filtering is active.** During the BNEP setup handshake, TinyPAN sends a `BNEP_CTRL_FILTER_MULTI_ADDR_SET` command instructing the NAP to suppress all multicast traffic except broadcast (`FF:FF:FF:FF:FF:FF`). This prevents the phone from forwarding SSDP, mDNS, and similar traffic over the BT link. If the NAP rejects the filter request, TinyPAN continues and all multicast traffic passes through.
 
-- **BNEP filter requests are declined.** The library responds to BNEP filter set requests with `0x0001` (Unsupported Request). This is permitted by the BNEP specification.
+- **BNEP TX pointer alignment.** `lwipopts.h` sets `ETH_PAD_SIZE = 1`, which causes lwIP to insert a 1-byte pad before every outgoing Ethernet header. When the BNEP transport strips the 14-byte Ethernet header and prepends the 15-byte BNEP header in-place, the net shift is zero, producing a naturally aligned payload pointer. HAL implementations that previously needed an alignment bounce check due to the old -1 byte shift no longer require it.
 
 - **Heartbeat is not implemented.** The `TINYPAN_ENABLE_HEARTBEAT` flag and the `heartbeat_interval_ms` / `heartbeat_retries` fields in `tinypan_config_t` are reserved for future use. The supervisor does not act on them.
 

@@ -25,6 +25,10 @@
 #include "lwip/ip4_addr.h"
 #include "netif/ethernet.h"
 
+#if TINYPAN_USE_BLE_SLIP
+#include "lwip/ip.h"
+#endif
+
 #include "tinypan_transport.h"
 
 #include <string.h>
@@ -55,25 +59,32 @@ static uint8_t s_mac_addr[6] = {0};
 
 /* The active transport layer handles TX/RX queues and sio interfaces */
 
-
-static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p);
+/*
+ * Private forward declaration for link status
+ */
 static void tinypan_netif_status_callback(struct netif* netif);
+static err_t tinypan_netif_linkoutput(struct netif* netif, struct pbuf* p);
+
+#if TINYPAN_USE_BLE_SLIP
+static err_t tinypan_slip_output_wrapper(struct netif *netif, struct pbuf *p, const ip4_addr_t *ipaddr) {
+    (void)ipaddr;
+    return tinypan_netif_linkoutput(netif, p);
+}
+#endif
 
 /* ============================================================================
- * lwIP Netif Initialization Callback
+ * Internal lwIP API mapping
  * ============================================================================ */
 
 /**
- * @brief lwIP netif initialization callback
- * 
- * Called by lwIP when adding the netif. Sets up the interface parameters.
+ * @brief lwIP network interface initialization callback
  */
 static err_t tinypan_netif_init_callback(struct netif* netif) {
     LWIP_ASSERT("netif != NULL", (netif != NULL));
     
     /* Set interface name */
-    netif->name[0] = IFNAME0;
-    netif->name[1] = IFNAME1;
+    netif->name[0] = 't';
+    netif->name[1] = 'p';
     
     const tinypan_transport_t* transport = tinypan_transport_get();
     
@@ -81,6 +92,9 @@ static err_t tinypan_netif_init_callback(struct netif* netif) {
         TINYPAN_LOG_INFO("Configuring lwIP netif for SLIP (BLE Companion Mode)");
         netif->mtu = TINYPAN_MTU;
         netif->flags = NETIF_FLAG_IGMP;
+#if TINYPAN_USE_BLE_SLIP
+        netif->output = tinypan_slip_output_wrapper;
+#endif
     } else {
         TINYPAN_LOG_INFO("Configuring lwIP netif for Ethernet (Native Mode)");
         netif->output = etharp_output;
@@ -181,8 +195,13 @@ int tinypan_netif_init(void) {
     IP4_ADDR(&netmask, 0, 0, 0, 0);
     IP4_ADDR(&gateway, 0, 0, 0, 0);
     
+#if TINYPAN_USE_BLE_SLIP
+    if (netif_add(&s_netif, &ipaddr, &netmask, &gateway, NULL,
+                  tinypan_netif_init_callback, ip_input) == NULL) {
+#else
     if (netif_add(&s_netif, &ipaddr, &netmask, &gateway, NULL,
                   tinypan_netif_init_callback, ethernet_input) == NULL) {
+#endif
         TINYPAN_LOG_ERROR("netif: Failed to add interface");
         return -1;
     }
@@ -217,6 +236,11 @@ int tinypan_netif_start_dhcp(void) {
         return -1;
     }
     
+    static bool s_dhcp_started = false;
+    if (s_dhcp_started) {
+        return 0; /* Auto-renewed by link_up */
+    }
+    
     TINYPAN_LOG_INFO("netif: Starting DHCP...");
     
     err_t err = dhcp_start(&s_netif);
@@ -225,6 +249,7 @@ int tinypan_netif_start_dhcp(void) {
         return -1;
     }
     
+    s_dhcp_started = true;
     return 0;
 }
 
@@ -272,12 +297,20 @@ void tinypan_netif_input(const uint8_t* dst_addr, const uint8_t* src_addr,
     TINYPAN_LOG_DEBUG("netif RX: %u bytes", total_len);
     
     /* Allocate a pbuf to hold the received data directly into lwIP pool */
+#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
+    struct pbuf* p = pbuf_alloc(PBUF_RAW, total_len + ETH_PAD_SIZE, PBUF_POOL);
+#else
     struct pbuf* p = pbuf_alloc(PBUF_RAW, total_len, PBUF_POOL);
+#endif
     if (p == NULL) {
         TINYPAN_LOG_WARN("netif: Failed to allocate pbuf for RX");
         return;
     }
-    
+
+#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
+    pbuf_remove_header(p, ETH_PAD_SIZE); /* Drop padding space temporarily for copying */
+#endif
+
     /* Copy data directly into pbuf, avoiding intermediate array copies */
     /* pbuf_take_at handles traversing chained PBUF_POOL pbufs safely */
     pbuf_take_at(p, dst_addr, 6 /* BNEP_ETHER_ADDR_LEN */, 0);
@@ -291,6 +324,10 @@ void tinypan_netif_input(const uint8_t* dst_addr, const uint8_t* src_addr,
     if (payload != NULL && payload_len > 0) {
         pbuf_take_at(p, payload, payload_len, 14);
     }
+    
+#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
+    pbuf_add_header(p, ETH_PAD_SIZE); /* Restore padding space before handing to lwIP */
+#endif
     
     /* Pass to lwIP's Ethernet input */
     if (s_netif.input(p, &s_netif) != ERR_OK) {
