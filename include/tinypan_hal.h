@@ -116,12 +116,12 @@ void hal_bt_l2cap_disconnect(void);
  * followed by an IP payload. In SLIP mode (TINYPAN_USE_BLE_SLIP=1), the buffer
  * contains raw SLIP-escaped bytes.
  *
- * The `data` pointer passed to this function will be 4-byte aligned when
- * BNEP mode is active. `lwipopts.h` sets `ETH_PAD_SIZE = 1` so that the
- * 1-byte pad inserted before the outgoing Ethernet header exactly cancels
- * the net -1 byte shift produced by swapping the 14-byte Ethernet header
- * with the 15-byte BNEP header in-place. HAL implementations do not need
- * an alignment bounce for this reason.
+ * NOTE ON ALIGNMENT: 
+ * TinyPAN prioritizes the alignment of the IP payload for lwIP performance. 
+ * Due to the 15-byte BNEP header, the start of the frame (the `data` pointer) 
+ * will typically be at an unaligned offset (e.g., addr % 4 == 1). 
+ * HAL implementations for DMA-enabled hardware MUST handle unaligned pointers, 
+ * typically by copying into a static aligned bounce buffer before transmission.
  *
  * @param data         Pointer to the frame (BNEP or SLIP)
  * @param len          Total length of the frame

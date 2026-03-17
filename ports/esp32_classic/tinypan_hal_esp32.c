@@ -63,9 +63,14 @@ typedef struct {
 } esp_event_msg_t;
 
 typedef struct {
-    uint8_t* payload;
+    uint8_t payload[TINYPAN_MAX_FRAME_SIZE + 16]; /* Pre-allocated aligned buffer */
     uint16_t length;
 } esp_rx_msg_t;
+
+/* Static pools to avoid malloc/free in ISR/BT tasks */
+static esp_rx_msg_t s_rx_pool[TINYPAN_ESP_RX_QUEUE_SIZE];
+static uint8_t s_rx_pool_idx = 0;
+static uint8_t s_tx_aligned_buf[2048] __attribute__((aligned(4)));
 
 static QueueHandle_t s_event_queue = NULL;
 static QueueHandle_t s_rx_queue = NULL;
@@ -93,13 +98,10 @@ void tinypan_hal_esp32_poll(void) {
     }
 
     /* 2. Drain incoming L2CAP data frames */
-    esp_rx_msg_t rx_msg;
+    esp_rx_msg_t* rx_msg;
     while (xQueueReceive(s_rx_queue, &rx_msg, 0) == pdTRUE) {
-        if (s_recv_cb && rx_msg.payload) {
-            s_recv_cb(rx_msg.payload, rx_msg.length, s_recv_cb_data);
-        }
-        if (rx_msg.payload) {
-            free(rx_msg.payload); /* Free the heap-copy made by the BT task */
+        if (s_recv_cb && rx_msg->length > 0) {
+            s_recv_cb(rx_msg->payload, rx_msg->length, s_recv_cb_data);
         }
     }
 }
@@ -146,18 +148,19 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
 
         case ESP_BT_L2CAP_DATA_IND_EVT:
             /* Data arrived from the remote PAN device.
-               We must copy it to the heap and queue it, as the p_data pointer
-               belongs to the volatile BT task. */
-            if (param->data_ind.len > 0 && param->data_ind.data) {
-                esp_rx_msg_t rx_msg;
-                rx_msg.length = param->data_ind.len;
-                rx_msg.payload = malloc(rx_msg.length);
-                if (rx_msg.payload) {
-                    memcpy(rx_msg.payload, param->data_ind.data, rx_msg.length);
-                    if (xQueueSend(s_rx_queue, &rx_msg, 0) != pdTRUE) {
-                        free(rx_msg.payload); /* Queue full, drop */
-                        ESP_LOGW(TAG, "RX Queue full, dropped inbound L2CAP frame");
-                    }
+               We use a pre-allocated block pool to pass data to the app task
+               WITHOUT calling malloc() in this high-priority context. */
+            if (param->data_ind.len > 0 && param->data_ind.data && 
+                param->data_ind.len <= sizeof(s_rx_pool[0].payload)) {
+                
+                esp_rx_msg_t* rx_msg = &s_rx_pool[s_rx_pool_idx];
+                rx_msg->length = param->data_ind.len;
+                memcpy(rx_msg->payload, param->data_ind.data, rx_msg->length);
+                
+                if (xQueueSend(s_rx_queue, &rx_msg, 0) == pdTRUE) {
+                    s_rx_pool_idx = (s_rx_pool_idx + 1) % TINYPAN_ESP_RX_QUEUE_SIZE;
+                } else {
+                    ESP_LOGW(TAG, "RX Queue full, dropped inbound L2CAP frame");
                 }
             }
             break;
@@ -175,7 +178,7 @@ int hal_bt_init(void) {
     if (s_hal_initialized) return 0;
 
     s_event_queue = xQueueCreate(TINYPAN_ESP_EVENT_QUEUE_SIZE, sizeof(esp_event_msg_t));
-    s_rx_queue = xQueueCreate(TINYPAN_ESP_RX_QUEUE_SIZE, sizeof(esp_rx_msg_t));
+    s_rx_queue = xQueueCreate(TINYPAN_ESP_RX_QUEUE_SIZE, sizeof(esp_rx_msg_t*));
 
     /* Initialize the Classic BT L2CAP client */
     esp_err_t ret = esp_bt_l2cap_register_callback(esp_l2cap_cb);
@@ -266,18 +269,12 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
        For safety in this reference port, we will conditionally bounce it. */
        
     if (((uintptr_t)data & 3) != 0) {
-        /* Pointer is unaligned (not on a 4-byte boundary).
-           Bounce it through an aligned heap allocation to prevent DMA HardFaults. */
-        uint8_t* aligned_buf = malloc(len);
-        if (!aligned_buf) return -1;
-        memcpy(aligned_buf, data, len);
+        /* Pointer is unaligned (likely due to BNEP header offset).
+           DMA requires 4-byte alignment. Bounce through our static aligned buffer. */
+        if (len > sizeof(s_tx_aligned_buf)) return -1;
+        memcpy(s_tx_aligned_buf, data, len);
         
-        /* The ESP-IDF l2cap API takes ownership and will eventually free this array?
-           Actually, esp_bt_l2cap_vfs_send takes a copy. We must structure it correctly. */
-        /* NOTE: the actual API is esp_bt_l2cap_vfs_send or esp_bt_l2cap_connect? 
-           We use the standard ESP Bluedroid TX. */
-        esp_err_t ret = esp_bt_l2cap_vfs_send(s_l2cap_handle, aligned_buf, len);
-        free(aligned_buf);
+        esp_err_t ret = esp_bt_l2cap_vfs_send(s_l2cap_handle, s_tx_aligned_buf, len);
         return (ret == ESP_OK) ? 0 : -1;
     }
 

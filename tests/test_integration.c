@@ -131,7 +131,7 @@ int main(void) {
         const uint8_t* tx_data = mock_hal_get_tx_history_data(i);
         uint16_t tx_len = mock_hal_get_tx_history_len(i);
         
-        if (tx_len == 16 && tx_data && 
+        if (tx_len == 40 && tx_data && 
             tx_data[0] == BNEP_PKT_TYPE_CONTROL && 
             tx_data[1] == BNEP_CTRL_FILTER_MULTI_ADDR_SET) {
             found_filter_req = true;
@@ -140,7 +140,7 @@ int main(void) {
     }
     
     if (!found_filter_req) {
-        printf("    FAILED: Expected Multicast Filter Request (len 16) in recent TX history, but not found.\n");
+        printf("    FAILED: Expected Multicast Filter Request (len 40) in recent TX history, but not found.\n");
         tinypan_deinit();
         return 1;
     }

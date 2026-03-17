@@ -81,6 +81,7 @@ void tinypan_config_init(tinypan_config_t* config) {
     config->heartbeat_interval_ms = 15000;
     config->heartbeat_retries = 3;
     config->max_reconnect_attempts = 0;  /* Infinite */
+    config->auto_init_lwip = TINYPAN_AUTO_INIT_LWIP;
 }
 
 tinypan_error_t tinypan_init(const tinypan_config_t* config) {

@@ -54,7 +54,9 @@ static void slip_transport_on_can_send_now(void) {
 #if TINYPAN_ENABLE_LWIP
 /* RX State Machine */
 static struct pbuf* s_slip_rx_pbuf = NULL;
-static uint16_t s_slip_rx_offset = 0;
+static struct pbuf* s_slip_rx_curr_pbuf = NULL;
+static uint16_t s_slip_rx_curr_offset = 0;
+static uint16_t s_slip_rx_total_offset = 0;
 static bool s_slip_rx_escape = false;
 
 /* TX State Machine */
@@ -79,7 +81,9 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                 /* OOM, drop bytes until we hit next frame */
                 continue;
             }
-            s_slip_rx_offset = 0;
+            s_slip_rx_curr_pbuf = s_slip_rx_pbuf;
+            s_slip_rx_curr_offset = 0;
+            s_slip_rx_total_offset = 0;
             s_slip_rx_escape = false;
         }
 
@@ -93,11 +97,11 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                 s_slip_rx_escape = true;
                 continue;
             } else if (c == SLIP_END) {
-                if (s_slip_rx_offset > 0) {
-                    pbuf_realloc(s_slip_rx_pbuf, s_slip_rx_offset);
+                if (s_slip_rx_total_offset > 0) {
+                    pbuf_realloc(s_slip_rx_pbuf, s_slip_rx_total_offset);
                     
                     struct netif* netif = tinypan_netif_get();
-                    if (netif && netif->input) {
+                    if (netif) {
                         if (netif->input(s_slip_rx_pbuf, netif) != ERR_OK) {
                             pbuf_free(s_slip_rx_pbuf);
                         }
@@ -105,21 +109,34 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                         pbuf_free(s_slip_rx_pbuf);
                     }
                     s_slip_rx_pbuf = NULL;
+                    s_slip_rx_curr_pbuf = NULL;
                 }
                 continue;
             }
         }
 
-        if (s_slip_rx_offset < TINYPAN_MAX_FRAME_SIZE) {
-            /* Use pbuf_take_at to safely write into chained PBUF_POOL pbufs.
-             * PBUF_POOL may return a linked list of smaller blocks; direct
-             * payload[offset] would overrun the first block's bounds. */
-            pbuf_take_at(s_slip_rx_pbuf, &c, 1, s_slip_rx_offset);
-            s_slip_rx_offset++;
+        if (s_slip_rx_total_offset < TINYPAN_MAX_FRAME_SIZE) {
+            /* O(N) write: maintain a cursor to the current pbuf in the chain. 
+             * This avoids the O(N^2) traversal penalty for PBUF_POOL chains. */
+            while (s_slip_rx_curr_pbuf != NULL && s_slip_rx_curr_offset >= s_slip_rx_curr_pbuf->len) {
+                s_slip_rx_curr_pbuf = s_slip_rx_curr_pbuf->next;
+                s_slip_rx_curr_offset = 0;
+            }
+
+            if (s_slip_rx_curr_pbuf != NULL) {
+                ((uint8_t*)s_slip_rx_curr_pbuf->payload)[s_slip_rx_curr_offset++] = c;
+                s_slip_rx_total_offset++;
+            } else {
+                /* Chain too short? (Shouldn't happen with pbuf_alloc(tot_len)) */
+                pbuf_free(s_slip_rx_pbuf);
+                s_slip_rx_pbuf = NULL;
+                s_slip_rx_curr_pbuf = NULL;
+            }
         } else {
             /* Overflow */
             pbuf_free(s_slip_rx_pbuf);
             s_slip_rx_pbuf = NULL;
+            s_slip_rx_curr_pbuf = NULL;
         }
     }
 #else

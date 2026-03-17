@@ -182,11 +182,13 @@ int tinypan_netif_init(void) {
                       s_mac_addr[0], s_mac_addr[1], s_mac_addr[2],
                       s_mac_addr[3], s_mac_addr[4], s_mac_addr[5]);
     
-    /* Initialize lwIP stack core (only once globally) */
-    static bool s_lwip_initialized = false;
-    if (!s_lwip_initialized) {
+    /* Initialize lwIP stack core if requested and not already done */
+    const tinypan_config_t* config = tinypan_internal_get_config();
+    static bool s_lwip_initialized_by_us = false;
+    if (config && config->auto_init_lwip && !s_lwip_initialized_by_us) {
+        /* WARNING: In shared stack environments (ESP32), the OS usually calls this. */
         lwip_init();
-        s_lwip_initialized = true;
+        s_lwip_initialized_by_us = true;
     }
     
     /* Add our network interface */

@@ -91,6 +91,7 @@ typedef struct {
     uint16_t heartbeat_interval_ms; /**< Link monitoring interval (default: 15000). Not implemented. */
     uint8_t  heartbeat_retries;     /**< Retries before declaring link dead (default: 3). Not implemented. */
     uint8_t  max_reconnect_attempts;/**< Maximum reconnect attempts, 0 = infinite (default: 0) */
+    bool     auto_init_lwip;        /**< If true, TinyPAN calls lwip_init(). Set false if host OS manages lwIP. (default: true) */
 } tinypan_config_t;
 
 /**

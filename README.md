@@ -141,19 +141,27 @@ The suite includes:
 - **SupervisorTests** — Verifies state machine transitions, timeout handling, and reconnection logic.
 - **IntegrationFlowTests** — Runs a complete DHCP DORA handshake: lwIP generates a real DHCP DISCOVER, the test harness responds with a simulated OFFER, lwIP sends a REQUEST, and the harness confirms with an ACK. The test passes when lwIP reports an assigned IP address.
 
+## Memory & Performance
+The library targets constrained embedded platforms (32KB-64KB RAM) and minimizes heap usage. 
+
+### BNEP Native Mode (Mode A)
+- **Fast Path**: If the radio is ready and the outgoing packet is a contiguous `pbuf`, TinyPAN manipulates the buffer in-place. It strips the Ethernet header (14 bytes), prepends the target BNEP header (typically 15 bytes for General Ethernet), and sends directly to the HAL. This avoids allocation and copying.
+- **Slow Path**: If the radio is busy or the `pbuf` is chained, the frame is cloned into a contiguous `PBUF_RAM` block and queued in a 3-slot ring buffer.
+- **Alignment**: TinyPAN sets `ETH_PAD_SIZE = 1` in `lwipopts.h`. This ensures that after adding the 1-byte pad, the 14-byte Ethernet header is replaced by a 15-byte BNEP header, so the **IP payload** remains 4-byte aligned for stack performance. Consequently, the start of the BNEP frame is at an unaligned offset (`addr % 4 == 1`).
+
+### BLE SLIP Mode (Mode B)
+- **Complexity**: O(N) streaming parser.
+- **Mechanism**: The SLIP transport backend builds `pbuf` chains incrementally as bytes arrive from the BLE UART characteristic. When the `0xC0` END byte is detected, the frame is dispatched to lwIP.
+
 ## Design Constraints
+- **Concurrency**: Single-threaded and non-reentrant. All API calls and HAL callbacks must execute in the same task context as `tinypan_process()`.
+- **Queueing**: TX and Control queues are bounded to prevent heap exhaustion.
+- **Protocol Compliance**: Implements BNEP v1.0, DHCP, and ARP. Dynamic multicast filtering supports Broadcast, IPv6 Neighbor Discovery, and mDNS.
+- **HAL Requirements**: HAL implementations for DMA-driven hardware must provide an internal bounce buffer for unaligned L2CAP payloads.
+- **BNEP Robustness**: Control packets (Setup, Filter) are managed via a 4-slot internal queue to prevent message loss during rapid state transitions.
+- **Header Compression**: Set `TINYPAN_FORCE_UNCOMPRESSED_TX` to 1 if the tethering host has a non-compliant BNEP parser. This forces General Ethernet headers for all outgoing data.
+- **Heartbeat**: Reserved for future use. The supervisor currently ignores `heartbeat_interval_ms` and `heartbeat_retries`.
 
-- **Single-threaded.** There is no internal synchronization. All calls to TinyPAN and all HAL callbacks must run in the same execution context. See the RTOS Threading section above.
-
-- **BNEP TX fast path (Mode A only).** When the radio is ready, the queue is empty, and the pbuf is contiguous (`p->next == NULL`), the netif manipulates the original `pbuf` in-place (strips 14-byte Ethernet header, adds 15-byte BNEP header, sends, reverts) without allocating or copying. Chained pbufs and busy-radio conditions fall through to the slow path which clones into `PBUF_RAM` before queuing. In SLIP mode (Mode B), the SLIP transport writes directly to the HAL without a separate queue layer.
-
-- **TX queue is bounded.** The queue holds up to `TINYPAN_TX_QUEUE_LEN` (default 3) packets. If the queue is full, the packet is dropped and `ERR_MEM` is returned to lwIP, which causes TCP to apply congestion backoff.
-
-- **BNEP multicast filtering is active.** During BNEP setup, TinyPAN sends a `BNEP_CTRL_FILTER_MULTI_ADDR_SET` command instructing the NAP to suppress all multicast traffic except broadcast (`FF:FF:FF:FF:FF:FF`). The supervisor enters `TINYPAN_STATE_BNEP_FILTER_WAIT` and defers DHCP until the NAP acknowledges the filter (or 2 seconds elapse). This prevents broadcast storms from mDNS/SSDP traffic over the Bluetooth link. If the request is rejected or ignored, the link proceeds to DHCP in a degraded state.
-
-- **BNEP TX pointer alignment.** `lwipopts.h` sets `ETH_PAD_SIZE = 1`, which causes lwIP to insert a 1-byte pad before every outgoing Ethernet header. When the BNEP transport strips the 14-byte Ethernet header and prepends the 15-byte BNEP header in-place, the net shift is zero, producing a naturally aligned payload pointer. HAL implementations that previously needed an alignment bounce check due to the old -1 byte shift no longer require it.
-
-- **Heartbeat is not implemented.** The `TINYPAN_ENABLE_HEARTBEAT` flag and the `heartbeat_interval_ms` / `heartbeat_retries` fields in `tinypan_config_t` are reserved for future use. The supervisor does not act on them.
 
 ## License
 

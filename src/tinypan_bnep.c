@@ -40,9 +40,17 @@ static void* s_setup_response_callback_user_data = NULL;
 static bnep_filter_response_callback_t s_filter_response_callback = NULL;
 static void* s_filter_response_callback_user_data = NULL;
 
-/** Control packet retry buffer */
-static uint8_t s_pending_control_buf[16];
-static uint8_t s_pending_control_len = 0;
+/** Control packet queue sizing */
+#define BNEP_CONTROL_QUEUE_LEN  4
+
+typedef struct {
+    uint8_t buf[20]; /* Max BNEP control is setup request (7) or filter (16) */
+    uint8_t len;
+} bnep_control_pkt_t;
+
+static bnep_control_pkt_t s_control_queue[BNEP_CONTROL_QUEUE_LEN];
+static uint8_t s_control_head = 0;
+static uint8_t s_control_tail = 0;
 
 /* ============================================================================
  * Helper Functions
@@ -475,9 +483,11 @@ int bnep_send_setup_response(uint16_t response_code) {
     int result = hal_bt_l2cap_send(tx_buffer, (uint16_t)pkt_len);
     if (result > 0) {
         TINYPAN_LOG_DEBUG("L2CAP busy, queuing BNEP setup response");
-        if ((size_t)pkt_len <= sizeof(s_pending_control_buf)) {
-            memcpy(s_pending_control_buf, tx_buffer, pkt_len);
-            s_pending_control_len = (uint8_t)pkt_len;
+        uint8_t next_tail = (s_control_tail + 1) % BNEP_CONTROL_QUEUE_LEN;
+        if (next_tail != s_control_head) {
+            memcpy(s_control_queue[s_control_tail].buf, tx_buffer, pkt_len);
+            s_control_queue[s_control_tail].len = (uint8_t)pkt_len;
+            s_control_tail = next_tail;
         }
         hal_bt_l2cap_request_can_send_now();
         return TINYPAN_ERR_BUSY;
@@ -490,17 +500,17 @@ int bnep_send_setup_response(uint16_t response_code) {
 }
 
 bool bnep_drain_control_tx_queue(void) {
-    if (s_pending_control_len > 0) {
-        int result = hal_bt_l2cap_send(s_pending_control_buf, s_pending_control_len);
+    while (s_control_head != s_control_tail) {
+        bnep_control_pkt_t* pkt = &s_control_queue[s_control_head];
+        int result = hal_bt_l2cap_send(pkt->buf, pkt->len);
         if (result == 0) {
-            s_pending_control_len = 0; /* Sent successfully */
-            return true;
+            s_control_head = (s_control_head + 1) % BNEP_CONTROL_QUEUE_LEN;
         } else if (result > 0) {
             hal_bt_l2cap_request_can_send_now();
             return false; /* Still busy */
         } else {
             TINYPAN_LOG_ERROR("Failed to drain BNEP control packet: %d", result);
-            s_pending_control_len = 0; /* Drop on fatal error */
+            s_control_head = (s_control_head + 1) % BNEP_CONTROL_QUEUE_LEN;
         }
     }
     return true; /* Queue empty or finished draining */
@@ -570,21 +580,30 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
                     if (response.response_code == BNEP_SETUP_RESPONSE_SUCCESS) {
                         set_state(BNEP_STATE_CONNECTED);
                         
-                        /* QA Round 16: Stop Broadcast Storms by filtering multicast to just Broadcast MAC */
-                        uint8_t filter_req[16] = {
+                        /* QA Round 18: Multicast Filtering and IPv6 Compliance.
+                         * To prevent broadcast storms while maintaining modern networking,
+                         * we filter to Broadcast, IPv6 (ND/mDNS), and IPv4 (mDNS). */
+                        uint8_t filter_req[] = {
                             BNEP_PKT_TYPE_CONTROL,
                             BNEP_CTRL_FILTER_MULTI_ADDR_SET,
-                            0x00, 0x0C, /* 12 bytes of filter payload */
-                            /* Start MAC: Broadcast */
-                            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                            /* End MAC: Broadcast */
-                            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+                            0x00, 0x24, /* 36 bytes of filter payload (3 ranges * 12 bytes) */
+                            /* Range 1: Standard Broadcast */
+                            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, /* Start MAC */
+                            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, /* End MAC */
+                            /* Range 2: IPv6 Multicast (33:33:xx:xx:xx:xx) - Covers ND and mDNSv6 */
+                            0x33, 0x33, 0x00, 0x00, 0x00, 0x00, /* Start MAC */
+                            0x33, 0x33, 0xFF, 0xFF, 0xFF, 0xFF, /* End MAC */
+                            /* Range 3: IPv4 Multicast (01:00:5e:xx:xx:xx) - Covers mDNSv4 */
+                            0x01, 0x00, 0x5E, 0x00, 0x00, 0x00, /* Start MAC */
+                            0x01, 0x00, 0x5E, 0xFF, 0xFF, 0xFF, /* End MAC */
                         };
                         int r = hal_bt_l2cap_send(filter_req, sizeof(filter_req));
                         if (r > 0) {
-                            if (sizeof(filter_req) <= sizeof(s_pending_control_buf)) {
-                                memcpy(s_pending_control_buf, filter_req, sizeof(filter_req));
-                                s_pending_control_len = sizeof(filter_req);
+                            uint8_t next_tail = (s_control_tail + 1) % BNEP_CONTROL_QUEUE_LEN;
+                            if (next_tail != s_control_head) {
+                                memcpy(s_control_queue[s_control_tail].buf, filter_req, sizeof(filter_req));
+                                s_control_queue[s_control_tail].len = sizeof(filter_req);
+                                s_control_tail = next_tail;
                             }
                             hal_bt_l2cap_request_can_send_now();
                         } else if (r < 0) {
@@ -622,9 +641,11 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
                 int result = hal_bt_l2cap_send(resp, sizeof(resp));
                 if (result > 0) {
                     TINYPAN_LOG_DEBUG("L2CAP busy, queuing filter response");
-                    if (sizeof(resp) <= sizeof(s_pending_control_buf)) {
-                        memcpy(s_pending_control_buf, resp, sizeof(resp));
-                        s_pending_control_len = sizeof(resp);
+                    uint8_t next_tail = (s_control_tail + 1) % BNEP_CONTROL_QUEUE_LEN;
+                    if (next_tail != s_control_head) {
+                        memcpy(s_control_queue[s_control_tail].buf, resp, sizeof(resp));
+                        s_control_queue[s_control_tail].len = sizeof(resp);
+                        s_control_tail = next_tail;
                     }
                     hal_bt_l2cap_request_can_send_now();
                 } else if (result < 0) {

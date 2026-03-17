@@ -121,6 +121,14 @@
 #endif
 
 /**
+ * Handle lwIP initialization internally.
+ * Set to 0 if your host application or OS (e.g. ESP-IDF) already initializes lwIP.
+ */
+#ifndef TINYPAN_AUTO_INIT_LWIP
+#define TINYPAN_AUTO_INIT_LWIP              1
+#endif
+
+/**
  * Enable automatic reconnection on disconnect.
  */
 #ifndef TINYPAN_ENABLE_AUTO_RECONNECT
