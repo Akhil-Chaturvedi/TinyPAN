@@ -140,6 +140,11 @@ typedef void (*bnep_state_callback_t)(bnep_state_t new_state, void* user_data);
  */
 typedef void (*bnep_setup_response_callback_t)(uint16_t response_code, void* user_data);
 
+/**
+ * @brief Callback for BNEP filter response
+ */
+typedef void (*bnep_filter_response_callback_t)(uint16_t response_code, void* user_data);
+
 /* ============================================================================
  * BNEP API Functions
  * ============================================================================ */
@@ -182,6 +187,11 @@ void bnep_register_state_callback(bnep_state_callback_t callback, void* user_dat
  * @brief Register callback for setup response
  */
 void bnep_register_setup_response_callback(bnep_setup_response_callback_t callback, void* user_data);
+
+/**
+ * @brief Register callback for filter response
+ */
+void bnep_register_filter_response_callback(bnep_filter_response_callback_t callback, void* user_data);
 
 /**
  * @brief Get current BNEP state

@@ -18,26 +18,6 @@ For BLE-only microcontrollers (e.g., nRF52, ESP32-C3/S3, STM32WB) that lack a Cl
 
 ### Transport Abstraction
 
-# TinyPAN
-
-TinyPAN is a C library that implements a Bluetooth PAN (Personal Area Network) client for embedded systems. It provides two operating modes: native Bluetooth Classic tethering via BNEP, and BLE-based tethering via SLIP over a UART-style characteristic. Both modes bridge into the lwIP TCP/IP stack so the device can obtain an IP address via DHCP and communicate over IP.
-
-## Architecture: Dual-Mode Connectivity
-
-TinyPAN operates in two distinct modes depending on your hardware capabilities, configurable via `TINYPAN_USE_BLE_SLIP` in `tinypan_config.h`:
-
-### Mode A: Native Bluetooth Classic (BNEP)
-For microcontrollers with a Bluetooth Classic or Dual-Mode radio (e.g., ESP32, Raspberry Pi Pico W).
-*   **Protocol:** lwIP -> BNEP encapsulation -> BT Classic L2CAP.
-*   **Phone side:** Uses the built-in iOS/Android Personal Hotspot. No companion app required.
-
-### Mode B: BLE Companion App (SLIP)
-For BLE-only microcontrollers (e.g., nRF52, ESP32-C3/S3, STM32WB) that lack a Classic radio.
-*   **Protocol:** lwIP -> SLIP framing -> BLE UART characteristic (e.g., Nordic UART Service).
-*   **Phone side:** Requires a companion app that reads SLIP frames from the BLE pipe and injects the contained IPv4 packets into the OS networking stack via `VpnService` (Android) or `NetworkExtension` (iOS).
-
-### Transport Abstraction
-
 Mode selection at compile time determines which transport backend is compiled in, but the core modules (`tinypan_supervisor.c`, `tinypan_lwip_netif.c`) are transport-agnostic at the source level. Each backend implements the `tinypan_transport_t` interface defined in `src/tinypan_transport.h`. This interface consists of function pointers for initialization, connection events, incoming data dispatch, TX queue management, and lwIP output. `tinypan_transport_get()` returns the active backend.
 
 ## Memory Footprint (BNEP Native Mode)
@@ -69,7 +49,7 @@ TinyPAN/
 ├── src/
 │   ├── tinypan.c            # Initialization, event routing, transport dispatch
 │   ├── tinypan_bnep.c       # BNEP protocol: frame building, parsing, state machine
-│   ├── tinypan_supervisor.c # Connection supervisor (IDLE -> CONNECTING -> DHCP -> ONLINE)
+│   ├── tinypan_supervisor.c # Connection supervisor (IDLE -> CONNECTING -> BNEP_SETUP -> FILTER_WAIT -> DHCP -> ONLINE)
 │   ├── tinypan_lwip_netif.c # lwIP netif driver (delegates TX/RX to active transport)
 │   ├── tinypan_transport.h  # Transport interface definition (tinypan_transport_t)
 │   ├── tinypan_transport.c  # Transport factory (returns active backend via tinypan_transport_get)
@@ -169,7 +149,7 @@ The suite includes:
 
 - **TX queue is bounded.** The queue holds up to `TINYPAN_TX_QUEUE_LEN` (default 3) packets. If the queue is full, the packet is dropped and `ERR_MEM` is returned to lwIP, which causes TCP to apply congestion backoff.
 
-- **BNEP multicast filtering is active.** During the BNEP setup handshake, TinyPAN sends a `BNEP_CTRL_FILTER_MULTI_ADDR_SET` command instructing the NAP to suppress all multicast traffic except broadcast (`FF:FF:FF:FF:FF:FF`). This prevents the phone from forwarding SSDP, mDNS, and similar traffic over the BT link. If the NAP rejects the filter request, TinyPAN continues and all multicast traffic passes through.
+- **BNEP multicast filtering is active.** During BNEP setup, TinyPAN sends a `BNEP_CTRL_FILTER_MULTI_ADDR_SET` command instructing the NAP to suppress all multicast traffic except broadcast (`FF:FF:FF:FF:FF:FF`). The supervisor enters `TINYPAN_STATE_BNEP_FILTER_WAIT` and defers DHCP until the NAP acknowledges the filter (or 2 seconds elapse). This prevents broadcast storms from mDNS/SSDP traffic over the Bluetooth link. If the request is rejected or ignored, the link proceeds to DHCP in a degraded state.
 
 - **BNEP TX pointer alignment.** `lwipopts.h` sets `ETH_PAD_SIZE = 1`, which causes lwIP to insert a 1-byte pad before every outgoing Ethernet header. When the BNEP transport strips the 14-byte Ethernet header and prepends the 15-byte BNEP header in-place, the net shift is zero, producing a naturally aligned payload pointer. HAL implementations that previously needed an alignment bounce check due to the old -1 byte shift no longer require it.
 

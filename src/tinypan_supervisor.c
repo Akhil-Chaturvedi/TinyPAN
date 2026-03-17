@@ -1,7 +1,8 @@
 /*
- * TinyPAN Supervisor - Implementation
+ * TinyPAN Supervisor
  * 
- * Connection state machine and link management.
+ * Manages the high-level connection state machine:
+ * IDLE -> CONNECTING -> BNEP_SETUP -> BNEP_FILTER_WAIT -> DHCP -> ONLINE
  */
 
 #include "tinypan_supervisor.h"
@@ -9,6 +10,7 @@
 #include "tinypan_bnep.h"
 #include "../include/tinypan_config.h"
 #include "../include/tinypan_hal.h"
+#include "tinypan_internal.h"
 #include <string.h>
 
 #if TINYPAN_ENABLE_LWIP
@@ -209,6 +211,25 @@ void supervisor_process(void) {
             }
             break;
             
+        case TINYPAN_STATE_BNEP_FILTER_WAIT:
+            /* Wait for the NAP to acknowledge the multicast filter.
+             * If it times out after TINYPAN_BNEP_FILTER_TIMEOUT_MS,
+             * proceed to DHCP anyway (filter is optional). */
+            if (timeout_elapsed(TINYPAN_BNEP_FILTER_TIMEOUT_MS)) {
+                TINYPAN_LOG_WARN("Filter ACK timeout, proceeding to DHCP without filter");
+                set_state(TINYPAN_STATE_DHCP);
+#if TINYPAN_ENABLE_LWIP
+                tinypan_netif_set_link(true);
+                if (tinypan_netif_start_dhcp() < 0) {
+                    TINYPAN_LOG_ERROR("Failed to start DHCP");
+                    hal_bt_l2cap_disconnect();
+                    set_state(TINYPAN_STATE_RECONNECTING);
+                    schedule_reconnect();
+                }
+#endif
+            }
+            break;
+            
         case TINYPAN_STATE_DHCP:
             /* Check for timeout */
             if (timeout_elapsed(TINYPAN_DHCP_TIMEOUT_MS)) {
@@ -320,11 +341,16 @@ void supervisor_on_l2cap_event(int event, int status) {
             
             /* QA Round 16: Persistent IP Leases */
             tinypan_netif_set_link(false);
+
+            /* QA Round 17: Clear stale IP flag so tinypan_is_online()
+             * returns false until DHCP completes again after reconnect. */
+            tinypan_internal_clear_ip();
 #endif
             
             if (s_state == TINYPAN_STATE_ONLINE || 
                 s_state == TINYPAN_STATE_DHCP ||
-                s_state == TINYPAN_STATE_BNEP_SETUP) {
+                s_state == TINYPAN_STATE_BNEP_SETUP ||
+                s_state == TINYPAN_STATE_BNEP_FILTER_WAIT) {
 #if TINYPAN_ENABLE_AUTO_RECONNECT
                 set_state(TINYPAN_STATE_RECONNECTING);
                 schedule_reconnect();
@@ -385,20 +411,11 @@ void supervisor_on_bnep_connected(void) {
 void supervisor_on_bnep_setup_response(uint16_t response_code) {
     if (response_code == BNEP_SETUP_RESPONSE_SUCCESS) {
         TINYPAN_LOG_INFO("BNEP setup successful");
-        set_state(TINYPAN_STATE_DHCP);
+        /* QA Round 17: Transition to filter-wait state instead of DHCP.
+         * The BNEP layer has already sent the multicast filter request.
+         * DHCP will start when the filter response arrives or times out. */
+        set_state(TINYPAN_STATE_BNEP_FILTER_WAIT);
         supervisor_on_bnep_connected();
-
-#if TINYPAN_ENABLE_LWIP
-        tinypan_netif_set_link(true);
-        if (tinypan_netif_start_dhcp() < 0) {
-            TINYPAN_LOG_ERROR("Failed to start DHCP");
-            hal_bt_l2cap_disconnect();
-            set_state(TINYPAN_STATE_RECONNECTING);
-            schedule_reconnect();
-        }
-#else
-        /* No lwIP: DHCP must be handled externally */
-#endif
     } else {
         TINYPAN_LOG_ERROR("BNEP setup rejected: 0x%04X", response_code);
         hal_bt_l2cap_disconnect();
@@ -415,6 +432,32 @@ void supervisor_on_bnep_setup_response(uint16_t response_code) {
 void supervisor_on_ip_acquired(void) {
     TINYPAN_LOG_INFO("IP acquired, transitioning to ONLINE");
     set_state(TINYPAN_STATE_ONLINE);
+}
+
+void supervisor_on_bnep_filter_response(uint16_t response_code) {
+    if (s_state != TINYPAN_STATE_BNEP_FILTER_WAIT) {
+        TINYPAN_LOG_DEBUG("Filter response in state %s, ignoring",
+                          tinypan_state_to_string(s_state));
+        return;
+    }
+
+    if (response_code == BNEP_FILTER_RESPONSE_SUCCESS) {
+        TINYPAN_LOG_INFO("NAP accepted multicast filter, starting DHCP");
+    } else {
+        TINYPAN_LOG_WARN("NAP rejected multicast filter (0x%04X), proceeding anyway",
+                         response_code);
+    }
+
+    set_state(TINYPAN_STATE_DHCP);
+#if TINYPAN_ENABLE_LWIP
+    tinypan_netif_set_link(true);
+    if (tinypan_netif_start_dhcp() < 0) {
+        TINYPAN_LOG_ERROR("Failed to start DHCP");
+        hal_bt_l2cap_disconnect();
+        set_state(TINYPAN_STATE_RECONNECTING);
+        schedule_reconnect();
+    }
+#endif
 }
 
 void supervisor_on_ip_lost(void) {
@@ -446,6 +489,9 @@ uint32_t supervisor_get_next_timeout_ms(void) {
             break;
         case TINYPAN_STATE_BNEP_SETUP:
             target_timeout = TINYPAN_BNEP_SETUP_TIMEOUT_MS;
+            break;
+        case TINYPAN_STATE_BNEP_FILTER_WAIT:
+            target_timeout = TINYPAN_BNEP_FILTER_TIMEOUT_MS;
             break;
         case TINYPAN_STATE_DHCP:
             target_timeout = TINYPAN_DHCP_TIMEOUT_MS;

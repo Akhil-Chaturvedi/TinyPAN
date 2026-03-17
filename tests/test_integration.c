@@ -112,6 +112,15 @@ int main(void) {
     printf("[Step 4] Phone Accepts BNEP Setup & Multicast Filter\n");
     mock_hal_simulate_bnep_setup_success();
     tinypan_process();
+
+    /* After BNEP setup, TinyPAN should be waiting for the multicast filter ACK */
+    if (tinypan_get_state() != TINYPAN_STATE_BNEP_FILTER_WAIT) {
+        printf("    FAILED: Expected BNEP_FILTER_WAIT (state = %s)\n",
+               tinypan_state_to_string(tinypan_get_state()));
+        tinypan_deinit();
+        return 1;
+    }
+    printf("    OK: State is BNEP_FILTER_WAIT\n");
     
     /* We expect TinyPAN to immediately send the BNEP Multicast Filter SET request */
     extern const uint8_t* mock_hal_get_tx_history_data(int);
@@ -292,6 +301,7 @@ int main(void) {
     const tinypan_state_t expected_states[] = {
         TINYPAN_STATE_CONNECTING,
         TINYPAN_STATE_BNEP_SETUP,
+        TINYPAN_STATE_BNEP_FILTER_WAIT,
         TINYPAN_STATE_DHCP,
         TINYPAN_STATE_ONLINE
     };

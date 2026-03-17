@@ -2,7 +2,8 @@
  * TinyPAN SLIP Transport Backend
  *
  * Implements tinypan_transport_t for BLE SLIP companion mode.
- * Only compiled when TINYPAN_USE_BLE_SLIP is 1.
+ * Features a streaming FSM for zero-buffer RX (writing directly to pbuf chains)
+ * and persistent TX queue drainage to handle radio backpressure.
  */
 
 #include "tinypan_transport.h"
@@ -110,9 +111,11 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
         }
 
         if (s_slip_rx_offset < TINYPAN_MAX_FRAME_SIZE) {
-            /* PBUF_POOL payloads are guaranteed contiguous since PBUF_POOL_BUFSIZE > MTU */
-            uint8_t* payload = (uint8_t*)s_slip_rx_pbuf->payload;
-            payload[s_slip_rx_offset++] = c;
+            /* Use pbuf_take_at to safely write into chained PBUF_POOL pbufs.
+             * PBUF_POOL may return a linked list of smaller blocks; direct
+             * payload[offset] would overrun the first block's bounds. */
+            pbuf_take_at(s_slip_rx_pbuf, &c, 1, s_slip_rx_offset);
+            s_slip_rx_offset++;
         } else {
             /* Overflow */
             pbuf_free(s_slip_rx_pbuf);
@@ -138,9 +141,13 @@ void slip_transport_drain_tx_queue(void) {
         
         struct pbuf* q = s_slip_tx_queue[s_slip_tx_head];
         
-        /* Encode exactly one MTU chunk to avoid stack explosion */
+        /* Encode exactly one chunk of escaped SLIP bytes to avoid stack explosion.
+         * Save the serialization offset before the loop so we can rewind if the
+         * radio returns BUSY, preventing silent data loss. */
         uint8_t chunk_buf[256];
         uint16_t chunk_idx = 0;
+        uint16_t saved_offset = s_slip_tx_offset;
+        bool saved_sending_end = s_slip_tx_sending_end;
         
         if (s_slip_tx_sending_end && s_slip_tx_offset == 0) {
             chunk_buf[chunk_idx++] = SLIP_END;
@@ -170,19 +177,16 @@ void slip_transport_drain_tx_queue(void) {
         if (chunk_idx > 0) {
             int result = hal_bt_l2cap_send(chunk_buf, chunk_idx);
             if (result > 0) {
-                /* Busy, fallback */
+                /* Radio busy: rewind the serialization state to the exact
+                 * position before this chunk was built.  The chunk_buf is
+                 * discarded but no bytes are lost because s_slip_tx_offset
+                 * is restored to its pre-chunk value. */
+                s_slip_tx_offset = saved_offset;
+                s_slip_tx_sending_end = saved_sending_end;
                 hal_bt_l2cap_request_can_send_now();
-                /* Rewind progress... SLIP doesn't cleanly rewind if we already escaped.
-                   Wait, stream transport means we MUST successfully send this chunk eventually.
-                   Since we just polled `can_send`, a busy return means Zephyr queue filled.
-                   For simplicity, we must accept that this atomic chunk was dropped if busy?
-                   Actually result > 0 usually means we should just wait for can_send_now.
-                   But if we rewound s_slip_tx_offset, we'd need to know exactly how many bytes 
-                   were consumed from original pbuf. 
-                   For now, this assumes hal_bt_l2cap_send succeeds 100% if can_send() was true. */
                 break;
             } else if (result < 0) {
-                /* Error, drop packet to clear queue */
+                /* Hard error, drop packet to clear queue */
                 finishing = true;
             }
         }

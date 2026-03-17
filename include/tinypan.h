@@ -45,6 +45,7 @@ typedef enum {
     TINYPAN_STATE_SCANNING,         /**< Scanning for devices (reserved, not implemented) */
     TINYPAN_STATE_CONNECTING,       /**< L2CAP connection in progress */
     TINYPAN_STATE_BNEP_SETUP,       /**< BNEP setup handshake in progress */
+    TINYPAN_STATE_BNEP_FILTER_WAIT, /**< Waiting for BNEP multicast filter response from NAP */
     TINYPAN_STATE_DHCP,             /**< L2CAP connected (BNEP negotiated or SLIP ready), running DHCP */
     TINYPAN_STATE_ONLINE,           /**< Fully connected, IP acquired */
     TINYPAN_STATE_STALLED,          /**< Link health check failed (reserved, not implemented) */

@@ -73,6 +73,13 @@ void supervisor_on_bnep_disconnected(void);
 void supervisor_on_bnep_setup_response(uint16_t response_code);
 
 /**
+ * @brief Called when BNEP multicast filter response is received
+ *
+ * @param response_code Filter response code (0x0000 = success)
+ */
+void supervisor_on_bnep_filter_response(uint16_t response_code);
+
+/**
  * @brief Called when IP address is acquired via DHCP
  */
 void supervisor_on_ip_acquired(void);

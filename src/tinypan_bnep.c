@@ -1,7 +1,8 @@
 /*
- * TinyPAN BNEP Layer - Implementation
+ * TinyPAN BNEP Layer
  * 
- * Bluetooth Network Encapsulation Protocol implementation.
+ * Bluetooth Network Encapsulation Protocol: frame construction, 
+ * control packet handling, and protocol state management.
  */
 
 #include "tinypan_bnep.h"
@@ -34,6 +35,10 @@ static void* s_state_callback_user_data = NULL;
 /** Setup response callback */
 static bnep_setup_response_callback_t s_setup_response_callback = NULL;
 static void* s_setup_response_callback_user_data = NULL;
+
+/** Filter response callback */
+static bnep_filter_response_callback_t s_filter_response_callback = NULL;
+static void* s_filter_response_callback_user_data = NULL;
 
 /** Control packet retry buffer */
 static uint8_t s_pending_control_buf[16];
@@ -413,6 +418,11 @@ void bnep_register_setup_response_callback(bnep_setup_response_callback_t callba
     s_setup_response_callback_user_data = user_data;
 }
 
+void bnep_register_filter_response_callback(bnep_filter_response_callback_t callback, void* user_data) {
+    s_filter_response_callback = callback;
+    s_filter_response_callback_user_data = user_data;
+}
+
 bnep_state_t bnep_get_state(void) {
     return s_state;
 }
@@ -624,11 +634,19 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
             break;
             
         case BNEP_CTRL_FILTER_MULTI_ADDR_RESPONSE:
-            TINYPAN_LOG_INFO("BNEP Multicast Filter Set confirmed by NAP");
-            break;
-            
         case BNEP_CTRL_FILTER_NET_TYPE_RESPONSE:
-            TINYPAN_LOG_INFO("BNEP NetType Filter Set confirmed by NAP");
+            {
+                /* Parse 2-byte response code from payload */
+                uint16_t filter_resp = 0x0001; /* default: unsupported */
+                if (len >= 4) {
+                    filter_resp = ((uint16_t)data[2] << 8) | data[3];
+                }
+                TINYPAN_LOG_INFO("BNEP Filter response: 0x%04X", filter_resp);
+
+                if (s_filter_response_callback) {
+                    s_filter_response_callback(filter_resp, s_filter_response_callback_user_data);
+                }
+            }
             break;
             
         case BNEP_CTRL_COMMAND_NOT_UNDERSTOOD:

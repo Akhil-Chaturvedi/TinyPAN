@@ -1,7 +1,8 @@
 /*
- * TinyPAN - Main Implementation
+ * TinyPAN Main Module
  * 
- * Entry point and public API implementation.
+ * Library entry point, public API implementation, and event routing 
+ * between HAL, supervisor, and transport layers.
  */
 
 #include "../include/tinypan.h"
@@ -246,6 +247,7 @@ const char* tinypan_state_to_string(tinypan_state_t state) {
         case TINYPAN_STATE_SCANNING:     return "SCANNING";
         case TINYPAN_STATE_CONNECTING:   return "CONNECTING";
         case TINYPAN_STATE_BNEP_SETUP:   return "BNEP_SETUP";
+        case TINYPAN_STATE_BNEP_FILTER_WAIT: return "BNEP_FILTER_WAIT";
         case TINYPAN_STATE_DHCP:         return "DHCP";
         case TINYPAN_STATE_ONLINE:       return "ONLINE";
         case TINYPAN_STATE_STALLED:      return "STALLED";

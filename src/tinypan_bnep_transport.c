@@ -2,7 +2,8 @@
  * TinyPAN BNEP Transport Backend
  *
  * Implements tinypan_transport_t for Bluetooth Classic BNEP mode.
- * Only compiled when TINYPAN_USE_BLE_SLIP is 0.
+ * Optimized for zero-copy transmission via in-place Ethernet-to-BNEP header
+ * swapping and naturally aligned payload offsets (ETH_PAD_SIZE=1).
  */
 
 #include "tinypan_transport.h"
@@ -27,6 +28,7 @@
 
 /* Forward declare supervisor callbacks we need to emit */
 extern void supervisor_on_bnep_setup_response(uint16_t response_code);
+extern void supervisor_on_bnep_filter_response(uint16_t response_code);
 
 static void bnep_transport_frame_cb(const bnep_ethernet_frame_t* frame, void* user_data) {
     (void)user_data;
@@ -46,10 +48,16 @@ static void bnep_transport_setup_response_cb(uint16_t response_code, void* user_
     supervisor_on_bnep_setup_response(response_code);
 }
 
+static void bnep_transport_filter_response_cb(uint16_t response_code, void* user_data) {
+    (void)user_data;
+    supervisor_on_bnep_filter_response(response_code);
+}
+
 static int bnep_transport_init(void) {
     bnep_init();
     bnep_register_frame_callback(bnep_transport_frame_cb, NULL);
     bnep_register_setup_response_callback(bnep_transport_setup_response_cb, NULL);
+    bnep_register_filter_response_callback(bnep_transport_filter_response_cb, NULL);
     
     const tinypan_config_t* config = tinypan_internal_get_config();
     if (config) {

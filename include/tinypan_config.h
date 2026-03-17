@@ -77,6 +77,13 @@
 #endif
 
 /**
+ * Timeout waiting for BNEP multicast filter response.
+ */
+#ifndef TINYPAN_BNEP_FILTER_TIMEOUT_MS
+#define TINYPAN_BNEP_FILTER_TIMEOUT_MS      2000
+#endif
+
+/**
  * Number of retries for BNEP setup request.
  */
 #ifndef TINYPAN_BNEP_SETUP_RETRIES

@@ -165,6 +165,19 @@ static int test_bnep_setup_success_transitions_to_dhcp(void) {
     mock_hal_simulate_bnep_setup_success();
     tinypan_process();
     
+    /* Should now be in FILTER_WAIT */
+    if (tinypan_get_state() != TINYPAN_STATE_BNEP_FILTER_WAIT) {
+        printf("\n    Expected BNEP_FILTER_WAIT, got %s\n", 
+               tinypan_state_to_string(tinypan_get_state()));
+        tinypan_deinit();
+        return 0;
+    }
+
+    /* Provide filter response to reach DHCP */
+    uint8_t filter_resp[] = {BNEP_PKT_TYPE_CONTROL, BNEP_CTRL_FILTER_MULTI_ADDR_RESPONSE, 0x00, 0x00};
+    mock_hal_simulate_receive(filter_resp, sizeof(filter_resp));
+    tinypan_process();
+
     if (tinypan_get_state() != TINYPAN_STATE_DHCP) {
         printf("\n    Expected DHCP, got %s\n", 
                tinypan_state_to_string(tinypan_get_state()));
@@ -213,6 +226,18 @@ static int test_disconnect_during_dhcp_triggers_reconnect(void) {
     mock_hal_simulate_bnep_setup_success();
     tinypan_process();
     
+    /* Inject filter response to reach DHCP */
+    uint8_t filter_resp[] = {BNEP_PKT_TYPE_CONTROL, BNEP_CTRL_FILTER_MULTI_ADDR_RESPONSE, 0x00, 0x00};
+    mock_hal_simulate_receive(filter_resp, sizeof(filter_resp));
+    tinypan_process();
+    
+    if (tinypan_get_state() != TINYPAN_STATE_DHCP) {
+        printf("\n    Expected DHCP before disconnect, got %s\n", 
+               tinypan_state_to_string(tinypan_get_state()));
+        tinypan_deinit();
+        return 0;
+    }
+
     /* Now disconnect */
     mock_hal_simulate_disconnect();
     tinypan_process();
@@ -241,6 +266,11 @@ static int test_stop_resets_to_idle(void) {
     mock_hal_simulate_bnep_setup_success();
     tinypan_process();
     
+    /* Inject filter response to reach DHCP */
+    uint8_t filter_resp[] = {BNEP_PKT_TYPE_CONTROL, BNEP_CTRL_FILTER_MULTI_ADDR_RESPONSE, 0x00, 0x00};
+    mock_hal_simulate_receive(filter_resp, sizeof(filter_resp));
+    tinypan_process();
+
     /* Now stop */
     tinypan_stop();
     
@@ -565,8 +595,21 @@ static int test_reconnect_backoff_resets_after_success(void) {
     mock_hal_simulate_bnep_setup_success();
     tinypan_process();
 
+    if (tinypan_get_state() != TINYPAN_STATE_BNEP_FILTER_WAIT) {
+        printf("\n    Expected BNEP_FILTER_WAIT after successful reconnect setup, got %s\n",
+               tinypan_state_to_string(tinypan_get_state()));
+        tinypan_deinit();
+        teardown_mock_time();
+        return 0;
+    }
+
+    /* Inject filter response to reach DHCP */
+    uint8_t filter_resp[] = {BNEP_PKT_TYPE_CONTROL, BNEP_CTRL_FILTER_MULTI_ADDR_RESPONSE, 0x00, 0x00};
+    mock_hal_simulate_receive(filter_resp, sizeof(filter_resp));
+    tinypan_process();
+
     if (tinypan_get_state() != TINYPAN_STATE_DHCP) {
-        printf("\n    Expected DHCP after successful reconnect setup, got %s\n",
+        printf("\n    Expected DHCP after filter response, got %s\n",
                tinypan_state_to_string(tinypan_get_state()));
         tinypan_deinit();
         teardown_mock_time();
@@ -746,6 +789,10 @@ static int test_state_to_string(void) {
         printf("\n    BNEP_SETUP mismatch\n");
         return 0;
     }
+    if (strcmp(tinypan_state_to_string(TINYPAN_STATE_BNEP_FILTER_WAIT), "BNEP_FILTER_WAIT") != 0) {
+        printf("\n    BNEP_FILTER_WAIT mismatch\n");
+        return 0;
+    }
     if (strcmp(tinypan_state_to_string(TINYPAN_STATE_DHCP), "DHCP") != 0) {
         printf("\n    DHCP mismatch\n");
         return 0;
@@ -812,8 +859,20 @@ static int test_full_connection_flow(void) {
     /* BNEP setup */
     mock_hal_simulate_bnep_setup_success();
     tinypan_process();
+    if (tinypan_get_state() != TINYPAN_STATE_BNEP_FILTER_WAIT) {
+        printf("\n    Step 3 failed (expected FILTER_WAIT, got %s)\n",
+               tinypan_state_to_string(tinypan_get_state()));
+        tinypan_deinit();
+        return 0;
+    }
+
+    /* Inject filter response to reach DHCP */
+    uint8_t filter_resp[] = {BNEP_PKT_TYPE_CONTROL, BNEP_CTRL_FILTER_MULTI_ADDR_RESPONSE, 0x00, 0x00};
+    mock_hal_simulate_receive(filter_resp, sizeof(filter_resp));
+    tinypan_process();
     if (tinypan_get_state() != TINYPAN_STATE_DHCP) {
-        printf("\n    Step 3 failed\n");
+        printf("\n    Step 4 failed (expected DHCP, got %s)\n",
+               tinypan_state_to_string(tinypan_get_state()));
         tinypan_deinit();
         return 0;
     }
@@ -835,12 +894,18 @@ static int test_state_change_event_sequence(void) {
     tinypan_process();
     mock_hal_simulate_bnep_setup_success();
     tinypan_process();
+    
+    /* Inject filter response to reach DHCP */
+    uint8_t filter_resp[] = {BNEP_PKT_TYPE_CONTROL, BNEP_CTRL_FILTER_MULTI_ADDR_RESPONSE, 0x00, 0x00};
+    mock_hal_simulate_receive(filter_resp, sizeof(filter_resp));
+    tinypan_process();
+
     tinypan_internal_set_ip(0x0202A8C0u, 0x00FFFFFFu, 0x0102A8C0u, 0x08080808u);
     tinypan_stop();
 
-    /* Expected state changes: CONNECTING, BNEP_SETUP, DHCP, ONLINE, IDLE */
-    if (state_change_event_count < 5) {
-        printf("\n    Expected >=5 state change events, got %d\n", state_change_event_count);
+    /* Expected state changes: CONNECTING, BNEP_SETUP, FILTER_WAIT, DHCP, ONLINE, IDLE */
+    if (state_change_event_count < 6) {
+        printf("\n    Expected >=6 state change events, got %d\n", state_change_event_count);
         tinypan_deinit();
         return 0;
     }
@@ -868,6 +933,12 @@ static int test_ip_loss_transitions_to_dhcp(void) {
     tinypan_process();
     mock_hal_simulate_bnep_setup_success();
     tinypan_process();
+    
+    /* Inject filter response to reach DHCP */
+    uint8_t filter_resp[] = {BNEP_PKT_TYPE_CONTROL, BNEP_CTRL_FILTER_MULTI_ADDR_RESPONSE, 0x00, 0x00};
+    mock_hal_simulate_receive(filter_resp, sizeof(filter_resp));
+    tinypan_process();
+
     tinypan_internal_set_ip(0x0202A8C0u, 0x00FFFFFFu, 0x0102A8C0u, 0x08080808u);
 
     if (tinypan_get_state() != TINYPAN_STATE_ONLINE) {
@@ -895,6 +966,45 @@ static int test_ip_loss_transitions_to_dhcp(void) {
     return 1;
 }
 
+/**
+ * Test: BNEP filter timeout transitions to DHCP anyway
+ */
+static int test_bnep_filter_timeout_transitions_to_dhcp(void) {
+    tinypan_config_t config = get_test_config();
+    setup_mock_time(7000);
+
+    tinypan_init(&config);
+    tinypan_start();
+    mock_hal_simulate_connect_success();
+    tinypan_process();
+    mock_hal_simulate_bnep_setup_success();
+    tinypan_process();
+
+    if (tinypan_get_state() != TINYPAN_STATE_BNEP_FILTER_WAIT) {
+        printf("\n    Expected BNEP_FILTER_WAIT, got %s\n",
+               tinypan_state_to_string(tinypan_get_state()));
+        tinypan_deinit();
+        teardown_mock_time();
+        return 0;
+    }
+
+    /* Advance time past timeout */
+    mock_hal_advance_tick_ms(TINYPAN_BNEP_FILTER_TIMEOUT_MS + 10);
+    tinypan_process();
+
+    if (tinypan_get_state() != TINYPAN_STATE_DHCP) {
+        printf("\n    Expected DHCP after filter timeout, got %s\n",
+               tinypan_state_to_string(tinypan_get_state()));
+        tinypan_deinit();
+        teardown_mock_time();
+        return 0;
+    }
+
+    tinypan_deinit();
+    teardown_mock_time();
+    return 1;
+}
+
 /* ============================================================================
  * Main
  * ============================================================================ */
@@ -913,6 +1023,7 @@ int main(void) {
     TEST(l2cap_connect_timeout_triggers_reconnect);
     TEST(l2cap_connect_timeout_wraparound);
     TEST(bnep_setup_timeout_exhausts_retries);
+    TEST(bnep_filter_timeout_transitions_to_dhcp);
     TEST(reconnect_delay_wraparound);
     TEST(reconnect_backoff_timing_and_cap);
     TEST(reconnect_backoff_resets_after_success);
