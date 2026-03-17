@@ -166,6 +166,10 @@ void hal_bt_deinit(void) {
     s_event_callback = NULL;
 }
 
+void hal_bt_poll(void) {
+    /* Mock HAL is synchronous, nothing to poll in background */
+}
+
 int hal_bt_l2cap_connect(const uint8_t remote_addr[HAL_BD_ADDR_LEN], uint16_t psm, uint16_t local_mtu) {
     if (!s_initialized) {
         return -1;

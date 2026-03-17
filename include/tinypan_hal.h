@@ -80,6 +80,15 @@ typedef void (*hal_l2cap_event_callback_t)(hal_l2cap_event_t event, int status, 
 int hal_bt_init(void);
 
 /**
+ * @brief Poll the Bluetooth stack for events
+ * 
+ * Called periodically during `tinypan_process()`. Should drain any internal
+ * queues or handle background stack events to ensure they are processed
+ * in the same thread context as TinyPAN.
+ */
+void hal_bt_poll(void);
+
+/**
  * @brief De-initialize the Bluetooth stack
  * 
  * Called during tinypan_deinit(). Should clean up all Bluetooth resources.

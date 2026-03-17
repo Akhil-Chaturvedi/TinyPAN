@@ -152,93 +152,65 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
     if (!bnep_is_connected()) {
         return ERR_CONN;
     }
-    if (p->tot_len < 14) {
-        return ERR_ARG;
-    }
     
-    bool can_send_now = (s_bnep_tx_head == s_bnep_tx_tail) && 
-                        hal_bt_l2cap_can_send() && 
-                        (p->next == NULL);
-                        
-    if (can_send_now) {
-        
+    /* QA Round 19: Safe TX Path.
+     * We no longer modify the original pbuf in-place. Modifying headers in-place 
+     * corrupts the packet for lwIP's TCP retransmission queue and risks DMA 
+     * race conditions if the HAL is asynchronous. We now always copy into a 
+     * contiguous RAM pbuf. */
+
+    uint8_t dst_addr[6], src_addr[6];
+    uint16_t ethertype;
+    
 #if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
-        if (pbuf_remove_header(p, ETH_PAD_SIZE) != 0) return ERR_ARG;
+    uint16_t eth_offset = ETH_PAD_SIZE;
+#else
+    uint16_t eth_offset = 0;
 #endif
 
-        uint8_t* eth_hdr = (uint8_t*)p->payload;
-        uint8_t dst_addr[6], src_addr[6];
-        memcpy(dst_addr, &eth_hdr[0], 6);
-        memcpy(src_addr, &eth_hdr[6], 6);
-        uint16_t ethertype = ((uint16_t)eth_hdr[12] << 8) | eth_hdr[13];
-        
-        if (pbuf_remove_header(p, 14) != 0) return ERR_ARG;
-        
-        uint8_t header_len = bnep_get_ethernet_header_len(dst_addr, src_addr);
-        if (pbuf_add_header(p, header_len) != 0) {
-            pbuf_add_header(p, 14);
-            return ERR_IF;
-        }
-        
-        bnep_write_ethernet_header((uint8_t*)p->payload, header_len, dst_addr, src_addr, ethertype);
-        
-        int result = hal_bt_l2cap_send(p->payload, p->tot_len);
-        if (result == 0) {
-            /* Sent */
-        } else if (result < 0) {
-            TINYPAN_LOG_ERROR("transport_bnep: Fast-path BNEP send failed: %d", result);
-        } else {
-            hal_bt_l2cap_request_can_send_now();
-            struct pbuf* fallback_q = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
-            if (fallback_q != NULL) {
-                uint8_t next_tail = (s_bnep_tx_tail + 1) % TINYPAN_TX_QUEUE_LEN;
-                if (next_tail != s_bnep_tx_head) {
-                    s_bnep_tx_queue[s_bnep_tx_tail] = fallback_q;
-                    s_bnep_tx_tail = next_tail;
-                } else {
-                    pbuf_free(fallback_q);
-                }
-            }
-        }
-        pbuf_remove_header(p, header_len);
-        pbuf_add_header(p, 14);
-#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
-        pbuf_add_header(p, ETH_PAD_SIZE);
-#endif
-        return ERR_OK;
-    }
-    
-    struct pbuf* q = pbuf_alloc(PBUF_LINK, p->tot_len, PBUF_RAM);
+    /* Extract Ethernet headers from the original packet */
+    pbuf_copy_partial(p, dst_addr, 6, eth_offset + 0);
+    pbuf_copy_partial(p, src_addr, 6, eth_offset + 6);
+    uint8_t eth_type_buf[2];
+    pbuf_copy_partial(p, eth_type_buf, 2, eth_offset + 12);
+    ethertype = ((uint16_t)eth_type_buf[0] << 8) | eth_type_buf[1];
+
+    uint8_t bnep_hdr_len = bnep_get_ethernet_header_len(dst_addr, src_addr);
+    uint16_t payload_len = p->tot_len - (14 + eth_offset);
+    uint16_t total_bnep_len = bnep_hdr_len + payload_len;
+
+    /* Allocate a contiguous buffer for the BNEP frame */
+    struct pbuf* q = pbuf_alloc(PBUF_RAW, total_bnep_len, PBUF_RAM);
     if (q == NULL) return ERR_MEM;
-    if (pbuf_copy(q, p) != ERR_OK) { pbuf_free(q); return ERR_MEM; }
+
+    /* Write BNEP header */
+    bnep_write_ethernet_header((uint8_t*)q->payload, bnep_hdr_len, dst_addr, src_addr, ethertype);
     
-#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
-    if (pbuf_remove_header(q, ETH_PAD_SIZE) != 0) { pbuf_free(q); return ERR_ARG; }
-#endif
-    
-    uint8_t* eth_hdr = (uint8_t*)q->payload;
-    uint8_t dst_addr[6], src_addr[6];
-    memcpy(dst_addr, &eth_hdr[0], 6);
-    memcpy(src_addr, &eth_hdr[6], 6);
-    uint16_t ethertype = ((uint16_t)eth_hdr[12] << 8) | eth_hdr[13];
-    
-    if (pbuf_remove_header(q, 14) != 0) { pbuf_free(q); return ERR_ARG; }
-    uint8_t header_len = bnep_get_ethernet_header_len(dst_addr, src_addr);
-    if (pbuf_add_header(q, header_len) != 0) { pbuf_free(q); return ERR_IF; }
-    
-    bnep_write_ethernet_header((uint8_t*)q->payload, header_len, dst_addr, src_addr, ethertype);
-    
+    /* Copy IP payload from original pbuf (skipping 14-byte Ethernet header + pad) */
+    if (pbuf_copy_partial(p, (uint8_t*)q->payload + bnep_hdr_len, payload_len, 14 + eth_offset) != payload_len) {
+        pbuf_free(q);
+        return ERR_MEM;
+    }
+
+    /* Try sending immediately if queue is empty */
     if (s_bnep_tx_head == s_bnep_tx_tail) {
         if (!hal_bt_l2cap_can_send()) {
             hal_bt_l2cap_request_can_send_now();
         } else {
             int result = hal_bt_l2cap_send(q->payload, q->tot_len);
-            if (result == 0) { pbuf_free(q); return ERR_OK; }
-            else if (result < 0) { pbuf_free(q); return ERR_IF; }
-            else { hal_bt_l2cap_request_can_send_now(); }
+            if (result == 0) {
+                pbuf_free(q);
+                return ERR_OK;
+            } else if (result < 0) {
+                pbuf_free(q);
+                return ERR_IF;
+            } else {
+                hal_bt_l2cap_request_can_send_now();
+            }
         }
     }
     
+    /* Queue for asynchronous drainage */
     uint8_t next_tail = (s_bnep_tx_tail + 1) % TINYPAN_TX_QUEUE_LEN;
     if (next_tail == s_bnep_tx_head) {
         pbuf_free(q);

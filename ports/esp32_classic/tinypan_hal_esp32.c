@@ -80,13 +80,11 @@ static QueueHandle_t s_rx_queue = NULL;
  * ============================================================================ */
 
 /**
- * @brief The user MUST call this function from their `while(1)` polling loop
- *        alongside `tinypan_process()`.
- * 
- * This function drains the FreeRTOS queues (filled by the internal BT task)
+ * @brief Platform-specific polling implementation.
+ * Drains the FreeRTOS queues (filled by the internal BT task)
  * and safely invokes the TinyPAN HAL callbacks on the user's thread.
  */
-void tinypan_hal_esp32_poll(void) {
+void hal_bt_poll(void) {
     if (!s_hal_initialized) return;
 
     /* 1. Drain incoming L2CAP connection/disconnection events */

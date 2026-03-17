@@ -54,7 +54,7 @@ struct z_event_msg {
 K_MSGQ_DEFINE(s_zephyr_event_q, sizeof(struct z_event_msg), 16, 4);
 K_MUTEX_DEFINE(s_zephyr_rx_mutex);
 
-static uint8_t s_intermediate_rx[1024];
+static uint8_t s_intermediate_rx[2048];
 static uint16_t s_int_rx_head = 0;
 static uint16_t s_int_rx_tail = 0;
 
@@ -70,10 +70,9 @@ static bool s_tx_notify_pending = false;
  * ============================================================================ */
 
 /**
- * @brief The user MUST call this function from their `while(1)` polling loop
- *        alongside `tinypan_process()`.
+ * @brief Platform-specific polling implementation for Zephyr.
  */
-void tinypan_hal_zephyr_poll(void) {
+void hal_bt_poll(void) {
     if (!s_hal_initialized) return;
 
     /* 1. Drain incoming Connection/Disconnection events */

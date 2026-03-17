@@ -195,11 +195,12 @@ void tinypan_stop(void) {
 }
 
 void tinypan_process(void) {
-    if (!s_initialized) {
-        return;
-    }
-    
-    /* Process supervisor state machine */
+    if (!s_initialized) return;
+
+    /* Platform-specific polling (drains BT event/data queues) */
+    hal_bt_poll();
+
+    /* Process connection supervisor */
     supervisor_process();
 
     tinypan_state_t current_state = supervisor_get_state();

@@ -126,12 +126,18 @@ int main(void) {
     extern const uint8_t* mock_hal_get_tx_history_data(int);
     extern uint16_t mock_hal_get_tx_history_len(int);
     
+    /* QA Round 19: The filter length depends on whether IPv6 is enabled. */
+    uint16_t expected_filter_len = 4 + 12 + 12; /* header + broadcast + ipv4_multicast */
+#if defined(LWIP_IPV6) && LWIP_IPV6
+    expected_filter_len += 12;
+#endif
+
     bool found_filter_req = false;
     for (int i = 0; i < 5; i++) {
         const uint8_t* tx_data = mock_hal_get_tx_history_data(i);
         uint16_t tx_len = mock_hal_get_tx_history_len(i);
         
-        if (tx_len == 40 && tx_data && 
+        if (tx_len == expected_filter_len && tx_data && 
             tx_data[0] == BNEP_PKT_TYPE_CONTROL && 
             tx_data[1] == BNEP_CTRL_FILTER_MULTI_ADDR_SET) {
             found_filter_req = true;
@@ -140,7 +146,7 @@ int main(void) {
     }
     
     if (!found_filter_req) {
-        printf("    FAILED: Expected Multicast Filter Request (len 40) in recent TX history, but not found.\n");
+        printf("    FAILED: Expected Multicast Filter Request (len %u) in recent TX history, but not found.\n", expected_filter_len);
         tinypan_deinit();
         return 1;
     }

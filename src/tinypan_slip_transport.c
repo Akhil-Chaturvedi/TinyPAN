@@ -72,71 +72,97 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
 #if TINYPAN_ENABLE_LWIP
     if (len == 0 || data == NULL) return;
 
-    for (uint16_t i = 0; i < len; i++) {
-        uint8_t c = data[i];
-        
+    const uint8_t* p = data;
+    const uint8_t* end = data + len;
+
+    while (p < end) {
         if (s_slip_rx_pbuf == NULL) {
             s_slip_rx_pbuf = pbuf_alloc(PBUF_LINK, TINYPAN_MAX_FRAME_SIZE, PBUF_POOL);
-            if (s_slip_rx_pbuf == NULL) {
-                /* OOM, drop bytes until we hit next frame */
-                continue;
-            }
+            if (s_slip_rx_pbuf == NULL) return; /* OOM */
             s_slip_rx_curr_pbuf = s_slip_rx_pbuf;
             s_slip_rx_curr_offset = 0;
             s_slip_rx_total_offset = 0;
             s_slip_rx_escape = false;
         }
 
-        if (s_slip_rx_escape) {
-            s_slip_rx_escape = false;
-            if (c == SLIP_ESC_END) c = SLIP_END;
-            else if (c == SLIP_ESC_ESC) c = SLIP_ESC;
-            else continue; /* Protocol violation */
+        /* Fast path: search for next delimiter in the current block */
+        const uint8_t* next_delim = NULL;
+        if (!s_slip_rx_escape) {
+            const uint8_t* next_end = memchr(p, SLIP_END, end - p);
+            const uint8_t* next_esc = memchr(p, SLIP_ESC, end - p);
+            
+            if (next_end && next_esc) next_delim = (next_end < next_esc) ? next_end : next_esc;
+            else next_delim = next_end ? next_end : next_esc;
+        }
+
+        uint16_t chunk_len;
+        if (next_delim) {
+            chunk_len = (uint16_t)(next_delim - p);
         } else {
-            if (c == SLIP_ESC) {
+            chunk_len = (uint16_t)(end - p);
+        }
+
+        /* Copy non-escaped chunk directly into pbuf chain */
+        if (chunk_len > 0) {
+            uint16_t remain = TINYPAN_MAX_FRAME_SIZE - s_slip_rx_total_offset;
+            if (chunk_len > remain) chunk_len = remain;
+
+            uint16_t written = 0;
+            while (written < chunk_len && s_slip_rx_curr_pbuf != NULL) {
+                uint16_t space = s_slip_rx_curr_pbuf->len - s_slip_rx_curr_offset;
+                if (space == 0) {
+                    s_slip_rx_curr_pbuf = s_slip_rx_curr_pbuf->next;
+                    s_slip_rx_curr_offset = 0;
+                    continue;
+                }
+                uint16_t to_write = (chunk_len - written < space) ? (chunk_len - written) : space;
+                memcpy((uint8_t*)s_slip_rx_curr_pbuf->payload + s_slip_rx_curr_offset, p + written, to_write);
+                s_slip_rx_curr_offset += to_write;
+                written += to_write;
+                s_slip_rx_total_offset += to_write;
+            }
+            p += written;
+            if (written < chunk_len) { /* Overflow */
+                pbuf_free(s_slip_rx_pbuf);
+                s_slip_rx_pbuf = NULL;
+                return;
+            }
+        }
+
+        /* Process the delimiter or escape byte */
+        if (p < end) {
+            uint8_t c = *p++;
+            if (s_slip_rx_escape) {
+                s_slip_rx_escape = false;
+                if (c == SLIP_ESC_END) c = SLIP_END;
+                else if (c == SLIP_ESC_ESC) c = SLIP_ESC;
+                else continue; /* Protocol violation */
+                
+                /* Write the escaped byte */
+                if (s_slip_rx_total_offset < TINYPAN_MAX_FRAME_SIZE) {
+                    while (s_slip_rx_curr_pbuf != NULL && s_slip_rx_curr_offset >= s_slip_rx_curr_pbuf->len) {
+                        s_slip_rx_curr_pbuf = s_slip_rx_curr_pbuf->next;
+                        s_slip_rx_curr_offset = 0;
+                    }
+                    if (s_slip_rx_curr_pbuf) {
+                        ((uint8_t*)s_slip_rx_curr_pbuf->payload)[s_slip_rx_curr_offset++] = c;
+                        s_slip_rx_total_offset++;
+                    }
+                }
+            } else if (c == SLIP_ESC) {
                 s_slip_rx_escape = true;
-                continue;
             } else if (c == SLIP_END) {
                 if (s_slip_rx_total_offset > 0) {
                     pbuf_realloc(s_slip_rx_pbuf, s_slip_rx_total_offset);
-                    
                     struct netif* netif = tinypan_netif_get();
                     if (netif) {
-                        if (netif->input(s_slip_rx_pbuf, netif) != ERR_OK) {
-                            pbuf_free(s_slip_rx_pbuf);
-                        }
+                        if (netif->input(s_slip_rx_pbuf, netif) != ERR_OK) pbuf_free(s_slip_rx_pbuf);
                     } else {
                         pbuf_free(s_slip_rx_pbuf);
                     }
                     s_slip_rx_pbuf = NULL;
-                    s_slip_rx_curr_pbuf = NULL;
                 }
-                continue;
             }
-        }
-
-        if (s_slip_rx_total_offset < TINYPAN_MAX_FRAME_SIZE) {
-            /* O(N) write: maintain a cursor to the current pbuf in the chain. 
-             * This avoids the O(N^2) traversal penalty for PBUF_POOL chains. */
-            while (s_slip_rx_curr_pbuf != NULL && s_slip_rx_curr_offset >= s_slip_rx_curr_pbuf->len) {
-                s_slip_rx_curr_pbuf = s_slip_rx_curr_pbuf->next;
-                s_slip_rx_curr_offset = 0;
-            }
-
-            if (s_slip_rx_curr_pbuf != NULL) {
-                ((uint8_t*)s_slip_rx_curr_pbuf->payload)[s_slip_rx_curr_offset++] = c;
-                s_slip_rx_total_offset++;
-            } else {
-                /* Chain too short? (Shouldn't happen with pbuf_alloc(tot_len)) */
-                pbuf_free(s_slip_rx_pbuf);
-                s_slip_rx_pbuf = NULL;
-                s_slip_rx_curr_pbuf = NULL;
-            }
-        } else {
-            /* Overflow */
-            pbuf_free(s_slip_rx_pbuf);
-            s_slip_rx_pbuf = NULL;
-            s_slip_rx_curr_pbuf = NULL;
         }
     }
 #else
