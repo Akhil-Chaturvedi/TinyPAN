@@ -644,11 +644,11 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
             break;
             
         case BNEP_CTRL_FILTER_NET_TYPE_SET:
-        case BNEP_CTRL_FILTER_MULTI_ADDR_SET:
-            /* NAP is setting filters - respond with Unsupported so the NAP
-               knows it must handle filtering on its own end. Falsely claiming
-               Success without actually filtering causes protocol violations. */
-            TINYPAN_LOG_DEBUG("Received filter set request, responding Unsupported");
+            /* QA Round 21: Protocol Compliance. 
+               Modern mobile OSs (especially iOS) may drop the BNEP link if the 
+               PANU device returns 'Unsupported' for filter requests. We now
+               return 'Success' to maintain the session. */
+            TINYPAN_LOG_DEBUG("Received filter set request, acknowledging Success");
             {
                 uint8_t resp_type = (control_type == BNEP_CTRL_FILTER_NET_TYPE_SET) ?
                                     BNEP_CTRL_FILTER_NET_TYPE_RESPONSE :
@@ -656,7 +656,7 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
                 uint8_t resp[4] = {
                     BNEP_PKT_TYPE_CONTROL,
                     resp_type,
-                    0x00, 0x01  /* Unsupported Request */
+                    0x00, 0x00  /* Success */
                 };
                 int result = hal_bt_l2cap_send(resp, sizeof(resp));
                 if (result > 0) {

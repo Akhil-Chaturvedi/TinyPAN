@@ -331,11 +331,19 @@ void tinypan_netif_input(const uint8_t* dst_addr, const uint8_t* src_addr,
     pbuf_add_header(p, ETH_PAD_SIZE); /* Restore padding space before handing to lwIP */
 #endif
     
-    /* Pass to lwIP's Ethernet input */
+    /* Pass to lwIP input. In RTOS/NO_SYS=0 environments, we MUST use tcpip_input
+     * to ensure thread-safety. In bare-metal/NO_SYS=1, netif->input is safe. */
+#if NO_SYS
     if (s_netif.input(p, &s_netif) != ERR_OK) {
         TINYPAN_LOG_WARN("netif: Input processing failed");
         pbuf_free(p);
     }
+#else
+    if (tcpip_input(p, &s_netif) != ERR_OK) {
+        TINYPAN_LOG_WARN("netif: IP input (RTOS) failed");
+        pbuf_free(p);
+    }
+#endif
 }
 
 struct netif* tinypan_netif_get(void) {

@@ -78,7 +78,10 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
 
     while (p < end) {
         if (s_slip_rx_pbuf == NULL) {
-            s_slip_rx_pbuf = pbuf_alloc(PBUF_LINK, TINYPAN_MAX_FRAME_SIZE, PBUF_POOL);
+            /* QA Round 21: Conservative allocation. 
+             * Don't allocate 1500 bytes upfront. Allocate one pool-sized pbuf 
+             * and chain more as needed during streaming. */
+            s_slip_rx_pbuf = pbuf_alloc(PBUF_RAW, 0, PBUF_POOL); 
             if (s_slip_rx_pbuf == NULL) return; /* OOM */
             s_slip_rx_curr_pbuf = s_slip_rx_pbuf;
             s_slip_rx_curr_offset = 0;
@@ -105,17 +108,24 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
 
         /* Copy non-escaped chunk directly into pbuf chain */
         if (chunk_len > 0) {
-            uint16_t remain = TINYPAN_MAX_FRAME_SIZE - s_slip_rx_total_offset;
-            if (chunk_len > remain) chunk_len = remain;
-
             uint16_t written = 0;
-            while (written < chunk_len && s_slip_rx_curr_pbuf != NULL) {
+            while (written < chunk_idx && s_slip_rx_total_offset < TINYPAN_MAX_FRAME_SIZE) {
                 uint16_t space = s_slip_rx_curr_pbuf->len - s_slip_rx_curr_offset;
                 if (space == 0) {
-                    s_slip_rx_curr_pbuf = s_slip_rx_curr_pbuf->next;
+                    /* Current segment is full, allocate next one if not and if we are within limits */
+                    if (s_slip_rx_total_offset >= TINYPAN_MAX_FRAME_SIZE) break;
+                    struct pbuf* next = pbuf_alloc(PBUF_RAW, 0, PBUF_POOL);
+                    if (next == NULL) { /* OOM */
+                        pbuf_free(s_slip_rx_pbuf);
+                        s_slip_rx_pbuf = NULL;
+                        return;
+                    }
+                    pbuf_cat(s_slip_rx_pbuf, next);
+                    s_slip_rx_curr_pbuf = next;
                     s_slip_rx_curr_offset = 0;
-                    continue;
+                    space = s_slip_rx_curr_pbuf->len;
                 }
+                
                 uint16_t to_write = (chunk_len - written < space) ? (chunk_len - written) : space;
                 memcpy((uint8_t*)s_slip_rx_curr_pbuf->payload + s_slip_rx_curr_offset, p + written, to_write);
                 s_slip_rx_curr_offset += to_write;
@@ -123,7 +133,9 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                 s_slip_rx_total_offset += to_write;
             }
             p += written;
-            if (written < chunk_len) { /* Overflow */
+            
+            if (written < chunk_len && s_slip_rx_total_offset >= TINYPAN_MAX_FRAME_SIZE) {
+                /* Frame too large, drop it */
                 pbuf_free(s_slip_rx_pbuf);
                 s_slip_rx_pbuf = NULL;
                 return;

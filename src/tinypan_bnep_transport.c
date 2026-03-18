@@ -101,6 +101,7 @@ static void bnep_transport_on_can_send_now(void) {
 
 /* TX Queue moved from netif */
 static struct pbuf* s_bnep_tx_queue[TINYPAN_TX_QUEUE_LEN] = {0};
+static struct pbuf* s_bnep_tx_orig[TINYPAN_TX_QUEUE_LEN] = {0};
 static uint8_t s_bnep_tx_head = 0;
 static uint8_t s_bnep_tx_tail = 0;
 
@@ -119,9 +120,14 @@ void bnep_transport_drain_tx_queue(void) {
         }
         
         struct pbuf* q = s_bnep_tx_queue[s_bnep_tx_head];
-        int result = hal_bt_l2cap_send(q->payload, q->tot_len);
+        int result = hal_bt_l2cap_send_pbuf(q);
         
         if (result == 0) {
+            s_bnep_tx_queue[s_bnep_tx_head] = NULL;
+            if (s_bnep_tx_orig[s_bnep_tx_head]) {
+                pbuf_free(s_bnep_tx_orig[s_bnep_tx_head]);
+                s_bnep_tx_orig[s_bnep_tx_head] = NULL;
+            }
             s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
             pbuf_free(q);
         } else if (result > 0) {
@@ -129,6 +135,11 @@ void bnep_transport_drain_tx_queue(void) {
             break;
         } else {
             TINYPAN_LOG_ERROR("transport_bnep: Queue flush failed: %d", result);
+            s_bnep_tx_queue[s_bnep_tx_head] = NULL;
+            if (s_bnep_tx_orig[s_bnep_tx_head]) {
+                pbuf_free(s_bnep_tx_orig[s_bnep_tx_head]);
+                s_bnep_tx_orig[s_bnep_tx_head] = NULL;
+            }
             s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
             pbuf_free(q);
         }
@@ -140,6 +151,10 @@ void bnep_transport_flush_tx_queue(void) {
         if (s_bnep_tx_queue[s_bnep_tx_head] != NULL) {
             pbuf_free(s_bnep_tx_queue[s_bnep_tx_head]);
             s_bnep_tx_queue[s_bnep_tx_head] = NULL;
+        }
+        if (s_bnep_tx_orig[s_bnep_tx_head] != NULL) {
+            pbuf_free(s_bnep_tx_orig[s_bnep_tx_head]);
+            s_bnep_tx_orig[s_bnep_tx_head] = NULL;
         }
         s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
     }
@@ -184,29 +199,46 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
     /* 2. Write BNEP header into the header pbuf */
     bnep_write_ethernet_header((uint8_t*)h->payload, bnep_hdr_len, dst_addr, src_addr, ethertype);
     
-    /* 3. Prepare the original pbuf by hiding the Ethernet header.
-     * Note: We use pbuf_header to move the payload pointer forward by 14 bytes.
-     * While this is technically 'destructive' to the pbuf in the retransmission 
-     * queue, it is the standard zero-copy pattern for link-layer encapsulation.
-     * We increment the refcount so the BNEP layer can hold its own reference. */
-    pbuf_ref(p);
-    pbuf_header(p, -(14 + eth_offset));
+    /* 3. Create a non-destructive reference to the IP payload.
+     * We MUST NOT use pbuf_header(p, -14) because that mutates the original pbuf
+     * which lwIP needs for TCP retransmissions! Instead, we create a light 
+     * reference pbuf that points into the payload of the original frame. */
+    struct pbuf* payload_p = pbuf_alloc(PBUF_RAW, p->tot_len - (14 + eth_offset), PBUF_REF);
+    if (payload_p == NULL) {
+        pbuf_free(h);
+        return ERR_MEM;
+    }
+    payload_p->payload = (uint8_t*)p->payload + 14 + eth_offset;
     
-    /* 4. Chain: [BNEP Header] -> [IP Payload (Original Pbuf)] */
-    pbuf_chain(h, p);
+    /* Chain: [BNEP Header] -> [Payload Slice] */
+    pbuf_chain(h, payload_p);
+    
+    /* We store 'p' in a parallel array to ensure it isn't freed by lwIP 
+     * while the BNEP layer or radio is still using it. */
+    uint8_t next_tail = (s_bnep_tx_tail + 1) % TINYPAN_TX_QUEUE_LEN;
+    if (next_tail == s_bnep_tx_head) {
+        pbuf_free(h);
+        return ERR_MEM;
+    }
+    pbuf_ref(p);
+    s_bnep_tx_orig[s_bnep_tx_tail] = p;
+    
+    s_bnep_tx_queue[s_bnep_tx_tail] = h;
+    s_bnep_tx_tail = next_tail;
 
     /* Try sending immediately if queue is empty */
-    if (s_bnep_tx_head == s_bnep_tx_tail) {
+    if (s_bnep_tx_head == ((s_bnep_tx_tail + TINYPAN_TX_QUEUE_LEN - 1) % TINYPAN_TX_QUEUE_LEN)) {
         if (!hal_bt_l2cap_can_send()) {
             hal_bt_l2cap_request_can_send_now();
         } else {
             /* HAL MUST support non-contiguous chains via scatter-gather or bounce buffer */
             int result = hal_bt_l2cap_send_pbuf(h);
             if (result == 0) {
-                pbuf_free(h); /* This results in pbuf_free(p) as well, back to orig refcount */
+                /* s_bnep_tx_head is already at the right spot? No, we increment it now. */
+                bnep_transport_drain_tx_queue();
                 return ERR_OK;
             } else if (result < 0) {
-                pbuf_free(h);
+                bnep_transport_flush_tx_queue();
                 return ERR_IF;
             } else {
                 hal_bt_l2cap_request_can_send_now();
@@ -214,15 +246,6 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
         }
     }
     
-    /* Queue for asynchronous drainage */
-    uint8_t next_tail = (s_bnep_tx_tail + 1) % TINYPAN_TX_QUEUE_LEN;
-    if (next_tail == s_bnep_tx_head) {
-        pbuf_free(h);
-        return ERR_MEM;
-    }
-    
-    s_bnep_tx_queue[s_bnep_tx_tail] = h;
-    s_bnep_tx_tail = next_tail;
     return ERR_OK;
 }
 #endif
