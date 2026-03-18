@@ -226,6 +226,15 @@ int bnep_send_setup_request(void);
 int bnep_send_setup_response(uint16_t response_code);
 
 /**
+ * @brief Send a BNEP multicast address filter set request
+ * 
+ * @param filter_ranges  Pointer to an array of MAC address ranges (start, end)
+ * @param num_ranges     Number of ranges in the array
+ * @return 0 on success, negative error code on failure
+ */
+int bnep_set_multicast_filters(const uint8_t (*filter_ranges)[12], uint16_t num_ranges);
+
+/**
  * @brief Drain the pending control packet queue
  * 
  * Called by tinypan_netif_drain_tx_queue.

@@ -63,13 +63,10 @@ typedef struct {
 } esp_event_msg_t;
 
 typedef struct {
-    uint8_t payload[TINYPAN_MAX_FRAME_SIZE + 16]; /* Pre-allocated aligned buffer */
-    uint16_t length;
+    struct pbuf* p;
 } esp_rx_msg_t;
 
-/* Static pools to avoid malloc/free in ISR/BT tasks */
-static esp_rx_msg_t s_rx_pool[TINYPAN_ESP_RX_QUEUE_SIZE];
-static uint8_t s_rx_pool_idx = 0;
+/* Static bounce buffer for DMA alignment */
 static uint8_t s_tx_aligned_buf[2048] __attribute__((aligned(4)));
 
 static QueueHandle_t s_event_queue = NULL;
@@ -96,10 +93,13 @@ void hal_bt_poll(void) {
     }
 
     /* 2. Drain incoming L2CAP data frames */
-    esp_rx_msg_t* rx_msg;
+    esp_rx_msg_t rx_msg;
     while (xQueueReceive(s_rx_queue, &rx_msg, 0) == pdTRUE) {
-        if (s_recv_cb && rx_msg->length > 0) {
-            s_recv_cb(rx_msg->payload, rx_msg->length, s_recv_cb_data);
+        if (s_recv_cb && rx_msg.p) {
+            /* Pass the pbuf's contiguous payload directly. 
+             * PBUF_POOL pbufs are usually contiguous if the stack gives them to us. */
+            s_recv_cb((uint8_t*)rx_msg.p->payload, rx_msg.p->len, s_recv_cb_data);
+            pbuf_free(rx_msg.p);
         }
     }
 }
@@ -146,19 +146,18 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
 
         case ESP_BT_L2CAP_DATA_IND_EVT:
             /* Data arrived from the remote PAN device.
-               We use a pre-allocated block pool to pass data to the app task
-               WITHOUT calling malloc() in this high-priority context. */
-            if (param->data_ind.len > 0 && param->data_ind.data && 
-                param->data_ind.len <= sizeof(s_rx_pool[0].payload)) {
-                
-                esp_rx_msg_t* rx_msg = &s_rx_pool[s_rx_pool_idx];
-                rx_msg->length = param->data_ind.len;
-                memcpy(rx_msg->payload, param->data_ind.data, rx_msg->length);
-                
-                if (xQueueSend(s_rx_queue, &rx_msg, 0) == pdTRUE) {
-                    s_rx_pool_idx = (s_rx_pool_idx + 1) % TINYPAN_ESP_RX_QUEUE_SIZE;
+             * Instead of a 1.5KB BSS buffer, we allocate a pbuf from the lwIP pool. */
+            if (param->data_ind.len > 0 && param->data_ind.data) {
+                struct pbuf* p = pbuf_alloc(PBUF_RAW, param->data_ind.len, PBUF_POOL);
+                if (p != NULL) {
+                    pbuf_take(p, param->data_ind.data, param->data_ind.len);
+                    esp_rx_msg_t rx_msg = { .p = p };
+                    if (xQueueSend(s_rx_queue, &rx_msg, 0) != pdTRUE) {
+                        pbuf_free(p);
+                        ESP_LOGW(TAG, "RX Queue full, dropped inbound L2CAP frame");
+                    }
                 } else {
-                    ESP_LOGW(TAG, "RX Queue full, dropped inbound L2CAP frame");
+                    ESP_LOGW(TAG, "Failed to allocate pbuf for RX");
                 }
             }
             break;
@@ -176,7 +175,7 @@ int hal_bt_init(void) {
     if (s_hal_initialized) return 0;
 
     s_event_queue = xQueueCreate(TINYPAN_ESP_EVENT_QUEUE_SIZE, sizeof(esp_event_msg_t));
-    s_rx_queue = xQueueCreate(TINYPAN_ESP_RX_QUEUE_SIZE, sizeof(esp_rx_msg_t*));
+    s_rx_queue = xQueueCreate(TINYPAN_ESP_RX_QUEUE_SIZE, sizeof(esp_rx_msg_t));
 
     /* Initialize the Classic BT L2CAP client */
     esp_err_t ret = esp_bt_l2cap_register_callback(esp_l2cap_cb);
@@ -256,29 +255,42 @@ void hal_bt_l2cap_request_can_send_now(void) {
 
 int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
     if (!s_is_connected) return -1;
-    if (s_tx_busy) return TINYPAN_ERR_BUSY;
+    if (s_tx_busy) return 1;
 
-    /* WARNING: Zero-Copy Pointer Alignment!
-       TinyPAN's fast-path prepends the BNEP header in-place, meaning the 
-       `data` pointer here is highly likely to be unaligned (e.g. at an odd byte offset).
-       On the ESP32 (Xtensa or RISC-V), the CPU supports unaligned access, but 
-       underlying DMA hardware might reject it.
-       If the ESP-IDF Bluedroid send function crashes, you must bounce this buffer.
-       For safety in this reference port, we will conditionally bounce it. */
-       
+    /* CONDITIONAL BOUNCE: 
+     * If unaligned or non-contiguous (handled here by simple uint8*),
+     * we use the s_tx_aligned_buf. */
     if (((uintptr_t)data & 3) != 0) {
-        /* Pointer is unaligned (likely due to BNEP header offset).
-           DMA requires 4-byte alignment. Bounce through our static aligned buffer. */
         if (len > sizeof(s_tx_aligned_buf)) return -1;
         memcpy(s_tx_aligned_buf, data, len);
-        
         esp_err_t ret = esp_bt_l2cap_vfs_send(s_l2cap_handle, s_tx_aligned_buf, len);
         return (ret == ESP_OK) ? 0 : -1;
     }
 
-    /* Aligned pointer, send directly */
     esp_err_t ret = esp_bt_l2cap_vfs_send(s_l2cap_handle, (uint8_t*)data, len);
-    return (ret == ESP_OK) ? 0 : (ret == ESP_ERR_NO_MEM ? TINYPAN_ERR_BUSY : -1);
+    return (ret == ESP_OK) ? 0 : (ret == ESP_ERR_NO_MEM ? 1 : -1);
+}
+
+int hal_bt_l2cap_send_pbuf(struct pbuf* p) {
+    if (!s_is_connected) return -1;
+    if (s_tx_busy) return 1;
+    if (p == NULL) return -1;
+
+    /* If the chain is contiguous and aligned, we can send directly */
+    if (p->next == NULL && ((uintptr_t)p->payload & 3) == 0) {
+        esp_err_t ret = esp_bt_l2cap_vfs_send(s_l2cap_handle, p->payload, p->len);
+        return (ret == ESP_OK) ? 0 : (ret == ESP_ERR_NO_MEM ? 1 : -1);
+    }
+
+    /* Otherwise, we MUST bounce to s_tx_aligned_buf to ensure DMA safety */
+    if (p->tot_len > sizeof(s_tx_aligned_buf)) {
+        ESP_LOGE(TAG, "TX pbuf too large for bounce buffer: %u", p->tot_len);
+        return -1;
+    }
+
+    pbuf_copy_partial(p, s_tx_aligned_buf, p->tot_len, 0);
+    esp_err_t ret = esp_bt_l2cap_vfs_send(s_l2cap_handle, s_tx_aligned_buf, p->tot_len);
+    return (ret == ESP_OK) ? 0 : (ret == ESP_ERR_NO_MEM ? 1 : -1);
 }
 
 uint32_t hal_get_tick_ms(void) {

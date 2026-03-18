@@ -7,10 +7,16 @@
 
 #include "../../include/tinypan_hal.h"
 #include "../../include/tinypan_config.h"
+#if TINYPAN_ENABLE_LWIP
+#include "lwip/pbuf.h"
+#endif
+
 #include <string.h>
 #include <time.h>
+#include <stdio.h>
 
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
 #include <sys/time.h>
@@ -234,6 +240,44 @@ void hal_bt_l2cap_request_can_send_now(void) {
     if (s_can_send && s_event_callback) {
         s_event_callback(HAL_L2CAP_EVENT_CAN_SEND_NOW, 0, s_event_callback_user_data);
     }
+}
+
+int hal_bt_l2cap_send_pbuf(struct pbuf* p) {
+    if (!s_initialized || !s_connected) return -1;
+    if (p == NULL || p->tot_len == 0) return -1;
+    
+    if (!s_can_send) {
+        return 1; /* WOULD BLOCK */
+    }
+    
+    TINYPAN_LOG_DEBUG("[MOCK] Sending pbuf chain, tot_len=%u", p->tot_len);
+    
+    /* Store in history for tests/simulations */
+    s_tx_history_head = (s_tx_history_head + 1) % MOCK_TX_HISTORY_LEN;
+    s_tx_history_len[s_tx_history_head] = p->tot_len;
+    uint8_t* history_buf = s_tx_history_data[s_tx_history_head];
+    
+    if (p->tot_len <= 1500) {
+        pbuf_copy_partial(p, history_buf, p->tot_len, 0);
+    }
+    
+    /* Print debug info */
+    char hex[128] = {0};
+    int hex_len = 0;
+    uint16_t print_len = (p->tot_len > 32) ? 32 : p->tot_len;
+    pbuf_copy_partial(p, (uint8_t*)hex, print_len, 0); /* Borrow hex buf temporarily */
+    
+    /* Reformat hex as string */
+    uint8_t temp[32];
+    memcpy(temp, hex, print_len);
+    memset(hex, 0, sizeof(hex));
+    for (uint16_t i = 0; i < print_len; i++) {
+        hex_len += snprintf(hex + hex_len, sizeof(hex) - hex_len, "%02X ", temp[i]);
+    }
+    
+    TINYPAN_LOG_DEBUG("[MOCK] TX: %s", hex);
+    
+    return 0;
 }
 
 void hal_bt_l2cap_register_recv_callback(hal_l2cap_recv_callback_t callback, void* user_data) {

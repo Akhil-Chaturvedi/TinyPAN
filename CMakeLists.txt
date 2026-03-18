@@ -79,21 +79,30 @@ target_include_directories(tinypan PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# HAL Selection
+if(TINYPAN_USE_MOCK_HAL)
+    add_library(tinypan_hal_mock STATIC hal/mock/tinypan_hal_mock.c)
+    target_compile_definitions(tinypan_hal_mock PUBLIC
+        TINYPAN_ENABLE_LWIP=$<BOOL:${TINYPAN_ENABLE_LWIP}>
+    )
+    target_include_directories(tinypan_hal_mock PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/hal/mock
+    )
+    if(TINYPAN_ENABLE_LWIP)
+        target_include_directories(tinypan_hal_mock PUBLIC
+            ${lwip_SOURCE_DIR}/src/include
+        )
+    endif()
+    # Link HAL before lwIP since it depends on it
+    target_link_libraries(tinypan PUBLIC tinypan_hal_mock)
+endif()
+
 if(TINYPAN_ENABLE_LWIP)
     target_include_directories(tinypan PUBLIC
         ${lwip_SOURCE_DIR}/src/include
     )
     target_link_libraries(tinypan PUBLIC lwip_lib)
-endif()
-
-# HAL Selection
-if(TINYPAN_USE_MOCK_HAL)
-    add_library(tinypan_hal_mock STATIC hal/mock/tinypan_hal_mock.c)
-    target_include_directories(tinypan_hal_mock PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/hal/mock
-    )
-    target_link_libraries(tinypan PUBLIC tinypan_hal_mock)
 endif()
 
 # Tests
@@ -108,9 +117,17 @@ if(TINYPAN_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    # Link mock HAL for the BNEP tests (needed for hal_bt_l2cap_send calls)
+
+    # Link mock HAL first, then lwIP (since mock HAL depends on lwIP)
     if(TINYPAN_USE_MOCK_HAL)
         target_link_libraries(test_bnep tinypan_hal_mock)
+    endif()
+
+    if(TINYPAN_ENABLE_LWIP)
+        target_include_directories(test_bnep PRIVATE
+            ${lwip_SOURCE_DIR}/src/include
+        )
+        target_link_libraries(test_bnep lwip_lib)
     endif()
     
     add_test(NAME BNEPTests COMMAND test_bnep)
@@ -122,6 +139,7 @@ if(TINYPAN_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/hal/mock
     )
+    # Link order: tinypan -> tinypan_hal_mock -> lwip_lib
     target_link_libraries(test_supervisor tinypan)
 
     add_test(NAME SupervisorTests COMMAND test_supervisor)

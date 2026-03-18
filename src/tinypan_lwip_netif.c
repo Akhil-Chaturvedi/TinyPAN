@@ -385,8 +385,11 @@ void tinypan_netif_process(void) {
         return;
     }
     
-    /* Process lwIP timers */
+    /* Process lwIP timers only if running in bare-metal (NO_SYS=1) mode.
+     * In OS-mode (ESP32/Zephyr), lwIP's tcpip_thread handles its own timeouts. */
+#if NO_SYS
     sys_check_timeouts();
+#endif
 }
 
 void tinypan_netif_flush_queue(void) {

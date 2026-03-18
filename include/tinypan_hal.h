@@ -121,22 +121,26 @@ void hal_bt_l2cap_disconnect(void);
  * @brief Send data over the L2CAP channel
  *
  * Sends a single contiguous buffer over the Bluetooth channel.
- * In BNEP mode (TINYPAN_USE_BLE_SLIP=0), the buffer contains a BNEP header
- * followed by an IP payload. In SLIP mode (TINYPAN_USE_BLE_SLIP=1), the buffer
- * contains raw SLIP-escaped bytes.
  *
- * NOTE ON ALIGNMENT: 
- * TinyPAN prioritizes the alignment of the IP payload for lwIP performance. 
- * Due to the 15-byte BNEP header, the start of the frame (the `data` pointer) 
- * will typically be at an unaligned offset (e.g., addr % 4 == 1). 
- * HAL implementations for DMA-enabled hardware MUST handle unaligned pointers, 
- * typically by copying into a static aligned bounce buffer before transmission.
- *
- * @param data         Pointer to the frame (BNEP or SLIP)
+ * @param data         Pointer to the frame
  * @param len          Total length of the frame
- * @return 0 on success, negative error code on failure, positive if busy (try again)
+ * @return 0 on success, negative error code on failure, positive if busy
  */
 int hal_bt_l2cap_send(const uint8_t* data, uint16_t len);
+
+/**
+ * @brief Send an lwIP pbuf chain over the L2CAP channel
+ *
+ * This is the preferred way to send data to avoid redundant memory copies.
+ * The HAL implementation must handle potentially non-contiguous chains
+ * (e.g., by copying into an internal aligned bounce buffer or using
+ * scatter-gather DMA).
+ *
+ * @param p            Pointer to the pbuf(s) to send
+ * @return 0 on success, negative error code on failure, positive if busy
+ */
+struct pbuf; /* Forward declaration */
+int hal_bt_l2cap_send_pbuf(struct pbuf* p);
 
 /**
  * @brief Check if the L2CAP channel is ready to send data

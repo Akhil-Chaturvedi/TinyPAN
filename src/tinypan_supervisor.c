@@ -411,10 +411,45 @@ void supervisor_on_bnep_connected(void) {
 void supervisor_on_bnep_setup_response(uint16_t response_code) {
     if (response_code == BNEP_SETUP_RESPONSE_SUCCESS) {
         TINYPAN_LOG_INFO("BNEP setup successful");
-        /* QA Round 17: Transition to filter-wait state instead of DHCP.
-         * The BNEP layer has already sent the multicast filter request.
-         * DHCP will start when the filter response arrives or times out. */
-        set_state(TINYPAN_STATE_BNEP_FILTER_WAIT);
+        
+        /* QA Round 20: Layer Separation.
+         * The supervisor (closer to the network layer) now defines the 
+         * multicast MAC ranges instead of the BNEP protocol layer. */
+        
+        uint8_t filter_ranges[3][12];
+        uint16_t num_ranges = 0;
+
+        /* Range 1: Multicast/Broadcast (Universal) */
+        /* Start: FF:FF:FF:FF:FF:FF, End: FF:FF:FF:FF:FF:FF */
+        memset(filter_ranges[num_ranges], 0xFF, 12);
+        num_ranges++;
+
+        /* Range 2: IPv4 Multicast (01:00:5E:00:00:00 - 01:00:5E:7F:FF:FF) */
+        static const uint8_t mcast_v4_start[] = {0x01, 0x00, 0x5E, 0x00, 0x00, 0x00};
+        static const uint8_t mcast_v4_end[]   = {0x01, 0x00, 0x5E, 0x7F, 0xFF, 0xFF};
+        memcpy(filter_ranges[num_ranges], mcast_v4_start, 6);
+        memcpy(&filter_ranges[num_ranges][6], mcast_v4_end, 6);
+        num_ranges++;
+
+#if LWIP_IPV6
+        /* Range 3: IPv6 Multicast (33:33:00:00:00:00 - 33:33:FF:FF:FF:FF) */
+        memset(filter_ranges[num_ranges], 0x33, 2); 
+        memset(&filter_ranges[num_ranges][2], 0x00, 4);
+        memset(&filter_ranges[num_ranges][6], 0x33, 2);
+        memset(&filter_ranges[num_ranges][8], 0xFF, 4);
+        num_ranges++;
+#endif
+
+        if (bnep_set_multicast_filters((const uint8_t (*)[12])filter_ranges, num_ranges) == 0) {
+            set_state(TINYPAN_STATE_BNEP_FILTER_WAIT);
+        } else {
+            /* Fallback: proceed to DHCP if filter set fails */
+            TINYPAN_LOG_WARN("Failed to set multicast filters, proceeding to DHCP");
+            set_state(TINYPAN_STATE_DHCP);
+            tinypan_netif_set_link(true);
+            tinypan_netif_start_dhcp();
+        }
+        
         supervisor_on_bnep_connected();
     } else {
         TINYPAN_LOG_ERROR("BNEP setup rejected: 0x%04X", response_code);

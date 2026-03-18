@@ -9,7 +9,12 @@
 #include "../include/tinypan_config.h"
 #include "../include/tinypan_hal.h"
 #include "../include/tinypan.h"
+#if TINYPAN_ENABLE_LWIP
+#include "lwip/pbuf.h"
+#endif
+
 #include <string.h>
+#include <stdio.h>
 
 /* ============================================================================
  * Static State
@@ -215,6 +220,49 @@ int bnep_build_compressed_ethernet(uint8_t* buffer, uint16_t buffer_size,
     }
     
     return (int)required_size;
+}
+
+int bnep_set_multicast_filters(const uint8_t (*filter_ranges)[12], uint16_t num_ranges) {
+    if (s_state != BNEP_STATE_CONNECTED && s_state != BNEP_STATE_WAIT_FOR_CONNECTION_RESPONSE) {
+        return -1;
+    }
+
+    if (num_ranges == 0 || filter_ranges == NULL) {
+        return -1;
+    }
+
+    /* Calculate total payload size: 2 bytes (len) + (num_ranges * 12 bytes) */
+    uint16_t payload_size = num_ranges * 12;
+    
+    if (payload_size + 4 > BNEP_CONTROL_MAX_LEN) {
+        TINYPAN_LOG_ERROR("Multicast filter set too large: %u bytes", payload_size);
+        return -1;
+    }
+
+    uint8_t pkt[BNEP_CONTROL_MAX_LEN];
+    pkt[0] = BNEP_PKT_TYPE_CONTROL;
+    pkt[1] = BNEP_CTRL_FILTER_MULTI_ADDR_SET;
+    
+    /* Write total length of filter list in bytes */
+    write_be16(&pkt[2], payload_size);
+    
+    /* Copy filter ranges */
+    memcpy(&pkt[4], filter_ranges, payload_size);
+
+    /* Queue control packet */
+    uint16_t total_len = 4 + payload_size;
+    uint8_t next_tail = (s_control_tail + 1) % BNEP_CONTROL_QUEUE_LEN;
+    if (next_tail == s_control_head) {
+        return -1; /* Queue full */
+    }
+
+    bnep_control_pkt_t* q_pkt = &s_control_queue[s_control_tail];
+    q_pkt->len = (uint8_t)total_len;
+    memcpy(q_pkt->buf, pkt, total_len);
+    s_control_tail = next_tail;
+
+    hal_bt_l2cap_request_can_send_now();
+    return 0;
 }
 
 /* ============================================================================
@@ -576,70 +624,11 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
             TINYPAN_LOG_DEBUG("Received setup connection response");
             if (s_state == BNEP_STATE_WAIT_FOR_CONNECTION_RESPONSE) {
                 bnep_setup_response_t response;
-                /* Parse from byte 1 onwards (control type + response code) */
                 if (bnep_parse_setup_response(&data[1], len - 1, &response) == 0) {
                     TINYPAN_LOG_INFO("BNEP setup response: 0x%04X", response.response_code);
                     
                     if (response.response_code == BNEP_SETUP_RESPONSE_SUCCESS) {
                         set_state(BNEP_STATE_CONNECTED);
-                        
-                        /* QA Round 19: Conditional Multicast Filtering.
-                         * mDNSv4 and Broadcast are standard. mDNSv6 and ND are only 
-                         * filtered if the stack actually supports IPv6. */
-                        
-                        /* Calculate total payload size based on protocol support */
-                        uint16_t payload_size = 12; /* Start with Broadcast */
-#if LWIP_IPV6
-                        payload_size += 12; /* IPv6 ND/mDNS */
-#endif
-                        payload_size += 12; /* IPv4 mDNS */
-
-                        uint8_t filter_req[BNEP_CONTROL_MAX_LEN];
-                        uint16_t filter_len = 0;
-
-                        if (sizeof(filter_req) < (size_t)(4 + payload_size)) {
-                            TINYPAN_LOG_ERROR("Filter request buffer too small for payload");
-                            break;
-                        }
-                        
-                        filter_req[filter_len++] = BNEP_PKT_TYPE_CONTROL;
-                        filter_req[filter_len++] = BNEP_CTRL_FILTER_MULTI_ADDR_SET;
-                        
-                        filter_req[filter_len++] = (uint8_t)(payload_size >> 8);
-                        filter_req[filter_len++] = (uint8_t)(payload_size & 0xFF);
-                        
-                        /* Range 1: Standard Broadcast */
-                        memset(&filter_req[filter_len], 0xFF, 12);
-                        filter_len += 12;
-
-#if LWIP_IPV6
-                        /* Range 2: IPv6 Multicast (33:33:xx:xx:xx:xx) */
-                        uint8_t ipv6_start[] = {0x33, 0x33, 0x00, 0x00, 0x00, 0x00};
-                        uint8_t ipv6_end[]   = {0x33, 0x33, 0xFF, 0xFF, 0xFF, 0xFF};
-                        memcpy(&filter_req[filter_len], ipv6_start, 6);
-                        memcpy(&filter_req[filter_len + 6], ipv6_end, 6);
-                        filter_len += 12;
-#endif
-
-                        /* Range 3: IPv4 Multicast (01:00:5e:xx:xx:xx) - Covers mDNSv4 */
-                        uint8_t ipv4_mdns_start[] = {0x01, 0x00, 0x5E, 0x00, 0x00, 0x00};
-                        uint8_t ipv4_mdns_end[]   = {0x01, 0x00, 0x5E, 0xFF, 0xFF, 0xFF};
-                        memcpy(&filter_req[filter_len], ipv4_mdns_start, 6);
-                        memcpy(&filter_req[filter_len + 6], ipv4_mdns_end, 6);
-                        filter_len += 12;
-
-                        int r = hal_bt_l2cap_send(filter_req, filter_len);
-                        if (r > 0) {
-                            uint8_t next_tail = (s_control_tail + 1) % BNEP_CONTROL_QUEUE_LEN;
-                            if (next_tail != s_control_head) {
-                                memcpy(s_control_queue[s_control_tail].buf, filter_req, filter_len);
-                                s_control_queue[s_control_tail].len = (uint8_t)filter_len;
-                                s_control_tail = next_tail;
-                            }
-                            hal_bt_l2cap_request_can_send_now();
-                        } else if (r < 0) {
-                            TINYPAN_LOG_ERROR("Failed to send multi addr filter");
-                        }
                     }
                     
                     if (s_setup_response_callback) {
