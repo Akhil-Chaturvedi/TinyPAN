@@ -55,11 +55,11 @@ struct z_event_msg {
 K_MSGQ_DEFINE(s_zephyr_event_q, sizeof(struct z_event_msg), 16, 4);
 
 /* Concurrency: Lock-free Zephyr Ring Buffer replaces K_MUTEX_DEFINE to prevent stalls */
-RING_BUF_DECLARE(s_rx_ringbuf, 2048);
+RING_BUF_DECLARE(s_rx_ringbuf, 512);
 
 /* SLIP TX Chunker */
 /* TinyPAN passes ~1500 byte SLIP MTU frames. NUS must chunk them to BLE MTU */
-static uint8_t s_tx_buf[2048];
+static uint8_t s_tx_buf[1500];
 static uint16_t s_tx_len = 0;
 static uint16_t s_tx_offset = 0;
 static bool s_tx_notify_pending = false;
@@ -273,8 +273,49 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
     s_tx_len = len;
     s_tx_offset = 0;
     
-    /* Return success to TinyPAN so it drops the pbuf (we now own it in s_tx_buf) */
+    /* Return success to TinyPAN so it drops the buffer (we now own it in s_tx_buf) */
     return 0;
+}
+
+int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
+    if (!s_current_conn) return -1;
+
+    if (s_tx_len > 0) {
+        return TINYPAN_ERR_BUSY;
+    }
+
+    uint32_t total_len = 0;
+    for (uint16_t i = 0; i < iov_count; i++) {
+        total_len += iov[i].iov_len;
+    }
+    
+    if (total_len > sizeof(s_tx_buf)) return -1;
+
+    uint32_t offset = 0;
+    for (uint16_t i = 0; i < iov_count; i++) {
+        memcpy(s_tx_buf + offset, iov[i].iov_base, iov[i].iov_len);
+        offset += iov[i].iov_len;
+    }
+
+    s_tx_len = (uint16_t)total_len;
+    s_tx_offset = 0;
+    
+    return 0;
+}
+
+void hal_get_local_bd_addr(uint8_t addr[HAL_BD_ADDR_LEN]) {
+    /* Zephyr: Retrieve identity address */
+    bt_addr_le_t target_addr;
+    size_t count = 1;
+    bt_id_get(&target_addr, &count);
+    if (count > 0) {
+        /* Zephyr addresses are little-endian, reverse them for TinyPAN (big-endian) */
+        for (int i = 0; i < 6; i++) {
+            addr[i] = target_addr.a.val[5 - i];
+        }
+    } else {
+        memset(addr, 0, HAL_BD_ADDR_LEN);
+    }
 }
 
 uint32_t hal_get_tick_ms(void) {

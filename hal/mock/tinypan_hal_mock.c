@@ -242,35 +242,47 @@ void hal_bt_l2cap_request_can_send_now(void) {
     }
 }
 
-int hal_bt_l2cap_send_pbuf(struct pbuf* p) {
+int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
     if (!s_initialized || !s_connected) return -1;
-    if (p == NULL || p->tot_len == 0) return -1;
+    if (iov == NULL || iov_count == 0) return -1;
     
     if (!s_can_send) {
         return 1; /* WOULD BLOCK */
     }
     
-    TINYPAN_LOG_DEBUG("[MOCK] Sending pbuf chain, tot_len=%u", p->tot_len);
+    uint32_t tot_len = 0;
+    for (uint16_t i = 0; i < iov_count; i++) {
+        tot_len += iov[i].iov_len;
+    }
+    
+    TINYPAN_LOG_DEBUG("[MOCK] Sending iovec array, tot_len=%u", tot_len);
     
     /* Store in history for tests/simulations */
     s_tx_history_head = (s_tx_history_head + 1) % MOCK_TX_HISTORY_LEN;
-    s_tx_history_len[s_tx_history_head] = p->tot_len;
+    s_tx_history_len[s_tx_history_head] = (uint16_t)tot_len;
     uint8_t* history_buf = s_tx_history_data[s_tx_history_head];
     
-    if (p->tot_len <= 1500) {
-        pbuf_copy_partial(p, history_buf, p->tot_len, 0);
+    if (tot_len <= 1500) {
+        uint32_t offset = 0;
+        for (uint16_t i = 0; i < iov_count; i++) {
+            memcpy(history_buf + offset, iov[i].iov_base, iov[i].iov_len);
+            offset += iov[i].iov_len;
+        }
     }
     
     /* Print debug info */
     char hex[128] = {0};
     int hex_len = 0;
-    uint16_t print_len = (p->tot_len > 32) ? 32 : p->tot_len;
-    pbuf_copy_partial(p, (uint8_t*)hex, print_len, 0); /* Borrow hex buf temporarily */
+    uint16_t print_len = (tot_len > 32) ? 32 : (uint16_t)tot_len;
     
-    /* Reformat hex as string */
     uint8_t temp[32];
-    memcpy(temp, hex, print_len);
-    memset(hex, 0, sizeof(hex));
+    uint32_t temp_offset = 0;
+    for (uint16_t i = 0; i < iov_count && temp_offset < print_len; i++) {
+        uint16_t copy_len = (iov[i].iov_len < print_len - temp_offset) ? iov[i].iov_len : (print_len - temp_offset);
+        memcpy(temp + temp_offset, iov[i].iov_base, copy_len);
+        temp_offset += copy_len;
+    }
+    
     for (uint16_t i = 0; i < print_len; i++) {
         hex_len += snprintf(hex + hex_len, sizeof(hex) - hex_len, "%02X ", temp[i]);
     }

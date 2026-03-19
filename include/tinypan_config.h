@@ -104,9 +104,10 @@
 /**
  * BNEP Header Compression.
  * 
- * NOTE: For stability and compatibility with modern mobile OS networking stacks, 
- * TinyPAN permanently uses General Ethernet headers (15 bytes). Compression 
- * is disabled to prevent packet drops on globally routed traffic (DNS, TCP).
+ * For optimal compatibility with diverse mobile OS networking stacks, 
+ * uncompressed General Ethernet headers (15 bytes) are used for all 
+ * outgoing traffic. This ensures global IP packets (DNS, TCP) are correctly 
+ * routed by the host device.
  */
 #ifndef TINYPAN_ENABLE_COMPRESSION
 #define TINYPAN_ENABLE_COMPRESSION          0

@@ -126,7 +126,7 @@ int main(void) {
     extern const uint8_t* mock_hal_get_tx_history_data(int);
     extern uint16_t mock_hal_get_tx_history_len(int);
     
-    /* QA Round 19: The filter length depends on whether IPv6 is enabled. */
+    /* The filter configuration depends on whether IPv6 is enabled in lwIP. */
     uint16_t expected_filter_len = 4 + 12 + 12; /* header + broadcast + ipv4_multicast */
 #if defined(LWIP_IPV6) && LWIP_IPV6
     expected_filter_len += 12;

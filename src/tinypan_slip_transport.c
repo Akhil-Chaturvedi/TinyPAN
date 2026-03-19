@@ -65,7 +65,10 @@ static uint8_t s_slip_tx_head = 0;
 static uint8_t s_slip_tx_tail = 0;
 static struct pbuf* s_slip_tx_current = NULL; /* Tracks current segment in the chain */
 static uint16_t s_slip_tx_offset = 0;
-static bool s_slip_tx_sending_end = true; /* Need to send leading END */
+static uint8_t s_slip_tx_state = 0; /* 0 = START, 1 = PAYLOAD, 2 = END */
+
+static uint8_t s_slip_chunk_buf[128];
+static uint16_t s_slip_chunk_len = 0;
 
 #endif /* TINYPAN_ENABLE_LWIP */
 
@@ -186,8 +189,6 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
 
 #if TINYPAN_ENABLE_LWIP
 
-static uint8_t s_slip_tx_out_buf[TINYPAN_MAX_FRAME_SIZE * 2 + 2];
-
 void slip_transport_drain_tx_queue(void) {
     if (s_slip_tx_head == s_slip_tx_tail) return;
 
@@ -196,57 +197,90 @@ void slip_transport_drain_tx_queue(void) {
             hal_bt_l2cap_request_can_send_now();
             break;
         }
-        
-        /* The root packet in the queue */
+
+        /* If we have a pending chunk from a previous busy state, try sending it first */
+        if (s_slip_chunk_len > 0) {
+            int result = hal_bt_l2cap_send(s_slip_chunk_buf, s_slip_chunk_len);
+            if (result > 0) {
+                hal_bt_l2cap_request_can_send_now();
+                break;
+            } else if (result < 0) {
+                /* Hard error, drop packet */
+                s_slip_chunk_len = 0;
+                goto drop_packet;
+            }
+            s_slip_chunk_len = 0; /* Successfully sent */
+            continue; /* Immediately check if we can send more */
+        }
+
+        /* Fill the next chunk */
         struct pbuf* root_pbuf = s_slip_tx_queue[s_slip_tx_head];
-        
-        /* Performance Optimization: Encode the entire SLIP frame in one pass 
-         * instead of tiny chunks to improve HAL throughput. */
+        if (s_slip_tx_current == NULL) {
+            s_slip_tx_current = root_pbuf;
+            s_slip_tx_offset = 0;
+            s_slip_tx_state = 0;
+        }
+
         uint16_t chunk_idx = 0;
-        
-        /* Leading END byte */
-        s_slip_tx_out_buf[chunk_idx++] = SLIP_END;
-        
-        struct pbuf* curr = root_pbuf;
-        while (curr != NULL) {
-            uint8_t* payload = (uint8_t*)curr->payload;
-            for (uint16_t i = 0; i < curr->len; i++) {
-                if (chunk_idx >= sizeof(s_slip_tx_out_buf) - 2) {
-                    break; /* Safety limits */
+
+        if (s_slip_tx_state == 0) {
+            s_slip_chunk_buf[chunk_idx++] = SLIP_END;
+            s_slip_tx_state = 1;
+        }
+
+        if (s_slip_tx_state == 1) {
+            while (s_slip_tx_current != NULL && chunk_idx < sizeof(s_slip_chunk_buf) - 2) {
+                uint8_t* payload = (uint8_t*)s_slip_tx_current->payload;
+                while (s_slip_tx_offset < s_slip_tx_current->len && chunk_idx < sizeof(s_slip_chunk_buf) - 2) {
+                    uint8_t c = payload[s_slip_tx_offset++];
+                    if (c == SLIP_END) {
+                        s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
+                        s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_END;
+                    } else if (c == SLIP_ESC) {
+                        s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
+                        s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_ESC;
+                    } else {
+                        s_slip_chunk_buf[chunk_idx++] = c;
+                    }
                 }
-                
-                uint8_t c = payload[i];
-                if (c == SLIP_END) {
-                    s_slip_tx_out_buf[chunk_idx++] = SLIP_ESC;
-                    s_slip_tx_out_buf[chunk_idx++] = SLIP_ESC_END;
-                } else if (c == SLIP_ESC) {
-                    s_slip_tx_out_buf[chunk_idx++] = SLIP_ESC;
-                    s_slip_tx_out_buf[chunk_idx++] = SLIP_ESC_ESC;
-                } else {
-                    s_slip_tx_out_buf[chunk_idx++] = c;
+                if (s_slip_tx_offset >= s_slip_tx_current->len) {
+                    s_slip_tx_current = s_slip_tx_current->next;
+                    s_slip_tx_offset = 0;
                 }
             }
-            curr = curr->next;
+            if (s_slip_tx_current == NULL) {
+                s_slip_tx_state = 2;
+            }
         }
-        
-        /* Trailing END byte */
-        if (chunk_idx < sizeof(s_slip_tx_out_buf)) {
-            s_slip_tx_out_buf[chunk_idx++] = SLIP_END;
+
+        bool frame_done = false;
+        if (s_slip_tx_state == 2 && chunk_idx < sizeof(s_slip_chunk_buf)) {
+            s_slip_chunk_buf[chunk_idx++] = SLIP_END;
+            frame_done = true;
         }
-        
-        int result = hal_bt_l2cap_send(s_slip_tx_out_buf, chunk_idx);
-        if (result > 0) {
-            /* Radio busy: wait for CAN_SEND_NOW */
-            hal_bt_l2cap_request_can_send_now();
-            break;
-        } else {
-            /* Success or Hard error: drop packet and advance queue */
+
+        if (chunk_idx > 0) {
+            s_slip_chunk_len = chunk_idx;
+            int result = hal_bt_l2cap_send(s_slip_chunk_buf, s_slip_chunk_len);
+            if (result > 0) {
+                hal_bt_l2cap_request_can_send_now();
+                break;
+            } else if (result < 0) {
+                s_slip_chunk_len = 0;
+                goto drop_packet;
+            }
+            s_slip_chunk_len = 0; /* Sent successfully */
+        }
+
+        if (frame_done) {
+drop_packet:
             pbuf_free(root_pbuf);
             s_slip_tx_queue[s_slip_tx_head] = NULL;
             s_slip_tx_head = (s_slip_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
             s_slip_tx_current = NULL;
             s_slip_tx_offset = 0;
-            s_slip_tx_sending_end = true;
+            s_slip_tx_state = 0;
+            s_slip_chunk_len = 0;
         }
     }
 }
@@ -259,8 +293,10 @@ void slip_transport_flush_tx_queue(void) {
         }
         s_slip_tx_head = (s_slip_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
     }
+    s_slip_tx_current = NULL;
     s_slip_tx_offset = 0;
-    s_slip_tx_sending_end = true;
+    s_slip_tx_state = 0;
+    s_slip_chunk_len = 0;
 }
 
 static int slip_transport_output(struct netif* netif, struct pbuf* p) {

@@ -129,18 +129,26 @@ void hal_bt_l2cap_disconnect(void);
 int hal_bt_l2cap_send(const uint8_t* data, uint16_t len);
 
 /**
- * @brief Send an lwIP pbuf chain over the L2CAP channel
+ * @brief Scatter-gather I/O vector for zero-copy transmissions.
+ */
+typedef struct {
+    const uint8_t* iov_base; /**< Pointer to data buffer */
+    uint16_t iov_len;        /**< Length of data buffer */
+} tinypan_iovec_t;
+
+/**
+ * @brief Send a scatter-gather array over the L2CAP channel
  *
- * This is the preferred way to send data to avoid redundant memory copies.
+ * This is the preferred way to send data to avoid redundant memory copies
+ * when the payload is spread across multiple buffers.
  * The HAL implementation must handle potentially non-contiguous chains
- * (e.g., by copying into an internal aligned bounce buffer or using
- * scatter-gather DMA).
+ * (e.g., by copying into an internal aligned bounce buffer or using DMA).
  *
- * @param p            Pointer to the pbuf(s) to send
+ * @param iov          Array of I/O vectors
+ * @param iov_count    Number of vectors in the array
  * @return 0 on success, negative error code on failure, positive if busy
  */
-struct pbuf; /* Forward declaration */
-int hal_bt_l2cap_send_pbuf(struct pbuf* p);
+int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count);
 
 /**
  * @brief Check if the L2CAP channel is ready to send data

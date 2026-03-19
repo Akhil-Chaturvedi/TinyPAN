@@ -335,7 +335,7 @@ int bnep_parse_ethernet_frame(const uint8_t* data, uint16_t len,
         return -1;
     }
     
-    uint16_t ext_offset = header_len;
+    uint32_t ext_offset = header_len;
     while (has_ext) {
         if (ext_offset + 2 > len) {
             TINYPAN_LOG_WARN("Packet too short for BNEP extension header");

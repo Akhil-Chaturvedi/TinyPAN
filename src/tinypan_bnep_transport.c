@@ -120,7 +120,27 @@ void bnep_transport_drain_tx_queue(void) {
         }
         
         struct pbuf* q = s_bnep_tx_queue[s_bnep_tx_head];
-        int result = hal_bt_l2cap_send_pbuf(q);
+        int result = 0;
+        
+        /* Convert pbuf chain to iovec array */
+        tinypan_iovec_t iov[16];
+        uint16_t iov_count = 0;
+        struct pbuf* iter = q;
+        while (iter != NULL && iov_count < 16) {
+            if (iter->len > 0) {
+                iov[iov_count].iov_base = (const uint8_t*)iter->payload;
+                iov[iov_count].iov_len = iter->len;
+                iov_count++;
+            }
+            iter = iter->next;
+        }
+        
+        if (iter != NULL) {
+            TINYPAN_LOG_ERROR("transport_bnep: PBUF chain too long for iovec");
+            result = -1;
+        } else {
+            result = hal_bt_l2cap_send_iovec(iov, iov_count);
+        }
         
         if (result == 0) {
             s_bnep_tx_queue[s_bnep_tx_head] = NULL;
@@ -199,21 +219,30 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
     /* 2. Write BNEP header into the header pbuf */
     bnep_write_ethernet_header((uint8_t*)h->payload, bnep_hdr_len, dst_addr, src_addr, ethertype);
     
-    /* 3. Create a non-destructive reference to the IP payload.
-     * We MUST NOT use pbuf_header(p, -14) because that mutates the original pbuf
-     * which lwIP needs for TCP retransmissions! Instead, we create a light 
-     * reference pbuf that points into the payload of the original frame. */
-    struct pbuf* payload_p = pbuf_alloc(PBUF_RAW, p->len - (14 + eth_offset), PBUF_REF);
+    /* Handle subsequent fragments of the IP packet chain safely.
+     * We must skip the 14-byte MAC header (+ eth_offset). */
+    uint16_t strip_len = 14 + eth_offset;
+    struct pbuf* iter = p;
+    while (iter != NULL && strip_len >= iter->len) {
+        strip_len -= iter->len;
+        iter = iter->next;
+    }
+    
+    if (iter == NULL) {
+        pbuf_free(h);
+        return ERR_MEM;
+    }
+    
+    struct pbuf* payload_p = pbuf_alloc(PBUF_RAW, iter->len - strip_len, PBUF_REF);
     if (payload_p == NULL) {
         pbuf_free(h);
         return ERR_MEM;
     }
-    payload_p->payload = (uint8_t*)p->payload + 14 + eth_offset;
+    payload_p->payload = (uint8_t*)iter->payload + strip_len;
     
-    /* Handle subsequent fragments of the IP packet chain. */
-    if (p->next != NULL) {
-        pbuf_ref(p->next);
-        pbuf_cat(payload_p, p->next);
+    if (iter->next != NULL) {
+        pbuf_ref(iter->next);
+        pbuf_cat(payload_p, iter->next);
     }
     
     /* Chain: [BNEP Header] -> [Payload Slice] -> [Rest of Payload] */
@@ -237,18 +266,11 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
         if (!hal_bt_l2cap_can_send()) {
             hal_bt_l2cap_request_can_send_now();
         } else {
-            /* HAL MUST support non-contiguous chains via scatter-gather or bounce buffer */
-            int result = hal_bt_l2cap_send_pbuf(h);
-            if (result == 0) {
-                /* s_bnep_tx_head is already at the right spot? No, we increment it now. */
-                bnep_transport_drain_tx_queue();
-                return ERR_OK;
-            } else if (result < 0) {
-                bnep_transport_flush_tx_queue();
-                return ERR_IF;
-            } else {
-                hal_bt_l2cap_request_can_send_now();
-            }
+            /* Thread-Safety Fix: We NEVER drain the queue from the lwIP tcpip_thread 
+             * (which calls this linkoutput function). We only append to the queue 
+             * and signal the HAL to request a CAN_SEND_NOW event. The application 
+             * polling thread will then safely drain the queue without races. */
+            hal_bt_l2cap_request_can_send_now();
         }
     }
     
