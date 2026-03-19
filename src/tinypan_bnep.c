@@ -568,22 +568,12 @@ bool bnep_drain_control_tx_queue(void) {
 }
 
 uint8_t bnep_get_ethernet_header_len(const uint8_t* dst_addr, const uint8_t* src_addr) {
-#if TINYPAN_ENABLE_COMPRESSION
-#if TINYPAN_FORCE_UNCOMPRESSED_TX
     (void)dst_addr;
     (void)src_addr;
-#else
-    bool can_compress_dst = (memcmp(dst_addr, s_remote_addr, BNEP_ETHER_ADDR_LEN) == 0);
-    bool can_compress_src = (memcmp(src_addr, s_local_addr, BNEP_ETHER_ADDR_LEN) == 0);
     
-    if (can_compress_dst && can_compress_src) {
-        return 3;
-    }
-#endif
-#else
-    (void)dst_addr;
-    (void)src_addr;
-#endif
+    /* BNEP Protocol Compliance: Always use General Ethernet Format (Type 0x00) 
+     * to ensure compatibility with mobile OS networking stacks that may expect 
+     * the router MAC address in the source field. */
     return 15;
 }
 
@@ -644,10 +634,9 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
             break;
             
         case BNEP_CTRL_FILTER_NET_TYPE_SET:
-            /* QA Round 21: Protocol Compliance. 
-               Modern mobile OSs (especially iOS) may drop the BNEP link if the 
-               PANU device returns 'Unsupported' for filter requests. We now
-               return 'Success' to maintain the session. */
+            /* BNEP Protocol Compliance: Acknowledge filter requests with 'Success' 
+               to prevent session termination by host OS stacks (e.g. iOS) 
+               that require a valid response to keep the link active. */
             TINYPAN_LOG_DEBUG("Received filter set request, acknowledging Success");
             {
                 uint8_t resp_type = (control_type == BNEP_CTRL_FILTER_NET_TYPE_SET) ?

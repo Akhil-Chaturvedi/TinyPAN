@@ -22,6 +22,7 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/services/nus.h>
+#include <zephyr/sys/ring_buffer.h>
 
 #include <string.h>
 
@@ -52,11 +53,9 @@ struct z_event_msg {
    flat ring buffer protected by a mutex, rather than allocating blocks.
    The core TinyPAN `s_rx_queue` will eventually absorb it. */
 K_MSGQ_DEFINE(s_zephyr_event_q, sizeof(struct z_event_msg), 16, 4);
-K_MUTEX_DEFINE(s_zephyr_rx_mutex);
 
-static uint8_t s_intermediate_rx[2048];
-static uint16_t s_int_rx_head = 0;
-static uint16_t s_int_rx_tail = 0;
+/* Concurrency: Lock-free Zephyr Ring Buffer replaces K_MUTEX_DEFINE to prevent stalls */
+RING_BUF_DECLARE(s_rx_ringbuf, 2048);
 
 /* SLIP TX Chunker */
 /* TinyPAN passes ~1500 byte SLIP MTU frames. NUS must chunk them to BLE MTU */
@@ -84,27 +83,10 @@ void hal_bt_poll(void) {
     }
 
     /* 2. Drain incoming BLE UART byte stream */
-    k_mutex_lock(&s_zephyr_rx_mutex, K_FOREVER);
-    
-    /* If there is data in the intermediate ring buffer, feed it to TinyPAN */
-    if (s_int_rx_head != s_int_rx_tail && s_recv_cb) {
-        /* To keep it simple, we extract into a linear block to feed the callback.
-           This is slightly sub-optimal vs direct circular reading, but TinyPAN's
-           input expects a linear array anyway. */
-        uint8_t temp_buf[256];
-        uint16_t copied = 0;
-        
-        while (s_int_rx_head != s_int_rx_tail && copied < sizeof(temp_buf)) {
-            temp_buf[copied++] = s_intermediate_rx[s_int_rx_tail];
-            s_int_rx_tail = (s_int_rx_tail + 1) % sizeof(s_intermediate_rx);
-        }
-        
-        k_mutex_unlock(&s_zephyr_rx_mutex);
-        
-        /* Deliver to TinyPAN (which will feed it into its own SLIP queue) */
-        s_recv_cb(temp_buf, copied, s_recv_cb_data);
-    } else {
-        k_mutex_unlock(&s_zephyr_rx_mutex);
+    uint8_t temp_buf[256];
+    uint32_t read_len = ring_buf_get(&s_rx_ringbuf, temp_buf, sizeof(temp_buf));
+    if (read_len > 0 && s_recv_cb) {
+        s_recv_cb(temp_buf, read_len, s_recv_cb_data);
     }
 
     /* 3. Drain pending SLIP TX chunks */
@@ -186,20 +168,11 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 
 static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
                           uint16_t len) {
-    /* Write to intermediate ring buffer */
-    k_mutex_lock(&s_zephyr_rx_mutex, K_FOREVER);
-    
-    for (uint16_t i = 0; i < len; i++) {
-        uint16_t next_head = (s_int_rx_head + 1) % sizeof(s_intermediate_rx);
-        if (next_head == s_int_rx_tail) {
-            printk("Zephyr intermediate RX full!\n");
-            break; /* Drop */
-        }
-        s_intermediate_rx[s_int_rx_head] = data[i];
-        s_int_rx_head = next_head;
+    /* Concurrency: Lock-free put directly from BLE RX thread */
+    uint32_t wrote = ring_buf_put(&s_rx_ringbuf, data, len);
+    if (wrote < len) {
+        printk("Zephyr RX ringbuf full, dropped %lu bytes\n", (unsigned long)(len - wrote));
     }
-    
-    k_mutex_unlock(&s_zephyr_rx_mutex);
 }
 
 static struct bt_nus_cb nus_cb = {

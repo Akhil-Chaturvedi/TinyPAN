@@ -78,9 +78,8 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
 
     while (p < end) {
         if (s_slip_rx_pbuf == NULL) {
-            /* QA Round 21: Conservative allocation. 
-             * Don't allocate 1500 bytes upfront. Allocate one pool-sized pbuf 
-             * and chain more as needed during streaming. */
+            /* Memory Management: Use incremental pbuf allocation during SLIP 
+             * streaming to reduce peak RAM pressure. */
             s_slip_rx_pbuf = pbuf_alloc(PBUF_RAW, 0, PBUF_POOL); 
             if (s_slip_rx_pbuf == NULL) return; /* OOM */
             s_slip_rx_curr_pbuf = s_slip_rx_pbuf;
@@ -138,6 +137,7 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                 /* Frame too large, drop it */
                 pbuf_free(s_slip_rx_pbuf);
                 s_slip_rx_pbuf = NULL;
+                s_slip_rx_escape = false; /* Reset state on overflow */
                 return;
             }
         }
@@ -186,6 +186,8 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
 
 #if TINYPAN_ENABLE_LWIP
 
+static uint8_t s_slip_tx_out_buf[TINYPAN_MAX_FRAME_SIZE * 2 + 2];
+
 void slip_transport_drain_tx_queue(void) {
     if (s_slip_tx_head == s_slip_tx_tail) return;
 
@@ -198,89 +200,53 @@ void slip_transport_drain_tx_queue(void) {
         /* The root packet in the queue */
         struct pbuf* root_pbuf = s_slip_tx_queue[s_slip_tx_head];
         
-        /* Ensure our segment tracker is initialized if we just started this packet */
-        if (s_slip_tx_current == NULL) {
-            s_slip_tx_current = root_pbuf;
-            s_slip_tx_offset = 0;
-            s_slip_tx_sending_end = true;
-        }
-
-        /* Encode exactly one chunk of escaped SLIP bytes to avoid stack explosion.
-         * Save the serialization state before the loop so we can rewind if the
-         * radio returns BUSY. */
-        uint8_t chunk_buf[256];
+        /* Performance Optimization: Encode the entire SLIP frame in one pass 
+         * instead of tiny chunks to improve HAL throughput. */
         uint16_t chunk_idx = 0;
-        uint16_t saved_offset = s_slip_tx_offset;
-        struct pbuf* saved_current = s_slip_tx_current;
-        bool saved_sending_end = s_slip_tx_sending_end;
         
-        if (s_slip_tx_sending_end) {
-            chunk_buf[chunk_idx++] = SLIP_END;
-            s_slip_tx_sending_end = false;
-        }
+        /* Leading END byte */
+        s_slip_tx_out_buf[chunk_idx++] = SLIP_END;
         
-        /* Stream bytes from the pbuf out, escaping as we go */
-        bool finished_packet = false;
-        while (s_slip_tx_current != NULL && chunk_idx < sizeof(chunk_buf) - 2) {
-            uint8_t* payload = (uint8_t*)s_slip_tx_current->payload;
-            
-            while (s_slip_tx_offset < s_slip_tx_current->len && chunk_idx < sizeof(chunk_buf) - 2) {
-                uint8_t c = payload[s_slip_tx_offset++];
+        struct pbuf* curr = root_pbuf;
+        while (curr != NULL) {
+            uint8_t* payload = (uint8_t*)curr->payload;
+            for (uint16_t i = 0; i < curr->len; i++) {
+                if (chunk_idx >= sizeof(s_slip_tx_out_buf) - 2) {
+                    break; /* Safety limits */
+                }
                 
+                uint8_t c = payload[i];
                 if (c == SLIP_END) {
-                    chunk_buf[chunk_idx++] = SLIP_ESC;
-                    chunk_buf[chunk_idx++] = SLIP_ESC_END;
+                    s_slip_tx_out_buf[chunk_idx++] = SLIP_ESC;
+                    s_slip_tx_out_buf[chunk_idx++] = SLIP_ESC_END;
                 } else if (c == SLIP_ESC) {
-                    chunk_buf[chunk_idx++] = SLIP_ESC;
-                    chunk_buf[chunk_idx++] = SLIP_ESC_ESC;
+                    s_slip_tx_out_buf[chunk_idx++] = SLIP_ESC;
+                    s_slip_tx_out_buf[chunk_idx++] = SLIP_ESC_ESC;
                 } else {
-                    chunk_buf[chunk_idx++] = c;
+                    s_slip_tx_out_buf[chunk_idx++] = c;
                 }
             }
-
-            if (s_slip_tx_offset >= s_slip_tx_current->len) {
-                s_slip_tx_current = s_slip_tx_current->next;
-                s_slip_tx_offset = 0;
-            }
+            curr = curr->next;
         }
         
-        if (s_slip_tx_current == NULL) { 
-            /* We finished the entire pbuf chain for this packet */
-            if (chunk_idx < sizeof(chunk_buf)) {
-                chunk_buf[chunk_idx++] = SLIP_END;
-                finished_packet = true;
-            } else {
-                /* No room for the final END byte, we'll send it in the next chunk */
-                /* s_slip_tx_current is already NULL, which is fine. */
-            }
+        /* Trailing END byte */
+        if (chunk_idx < sizeof(s_slip_tx_out_buf)) {
+            s_slip_tx_out_buf[chunk_idx++] = SLIP_END;
         }
         
-        if (chunk_idx > 0) {
-            int result = hal_bt_l2cap_send(chunk_buf, chunk_idx);
-            if (result > 0) {
-                /* Radio busy: rewind the serialization state */
-                s_slip_tx_offset = saved_offset;
-                s_slip_tx_current = saved_current;
-                s_slip_tx_sending_end = saved_sending_end;
-                hal_bt_l2cap_request_can_send_now();
-                break;
-            } else if (result < 0) {
-                /* Hard error, drop packet */
-                finished_packet = true;
-            }
-        }
-        
-        if (finished_packet) {
+        int result = hal_bt_l2cap_send(s_slip_tx_out_buf, chunk_idx);
+        if (result > 0) {
+            /* Radio busy: wait for CAN_SEND_NOW */
+            hal_bt_l2cap_request_can_send_now();
+            break;
+        } else {
+            /* Success or Hard error: drop packet and advance queue */
             pbuf_free(root_pbuf);
             s_slip_tx_queue[s_slip_tx_head] = NULL;
             s_slip_tx_head = (s_slip_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
             s_slip_tx_current = NULL;
             s_slip_tx_offset = 0;
             s_slip_tx_sending_end = true;
-        } else {
-            /* We sent a chunk but didn't finish the packet. 
-             * Stop here and wait for next poll to avoid starving other tasks. */
-            break;
         }
     }
 }

@@ -339,11 +339,11 @@ void supervisor_on_l2cap_event(int event, int status) {
                 transport_tx->flush_queues();
             }
             
-            /* QA Round 16: Persistent IP Leases */
+            /* Link Status: Set link down on disconnect to notify lwIP stack */
             tinypan_netif_set_link(false);
 
-            /* QA Round 17: Clear stale IP flag so tinypan_is_online()
-             * returns false until DHCP completes again after reconnect. */
+            /* Internal State: Clear IP information on disconnect to ensure 
+             * tinypan_is_online() reflects current link status. */
             tinypan_internal_clear_ip();
 #endif
             
@@ -412,9 +412,8 @@ void supervisor_on_bnep_setup_response(uint16_t response_code) {
     if (response_code == BNEP_SETUP_RESPONSE_SUCCESS) {
         TINYPAN_LOG_INFO("BNEP setup successful");
         
-        /* QA Round 20: Layer Separation.
-         * The supervisor (closer to the network layer) now defines the 
-         * multicast MAC ranges instead of the BNEP protocol layer. */
+        /* Multicast Filtering: Define standard multicast MAC ranges 
+         * for the BNEP filter request. */
         
         uint8_t filter_ranges[3][12];
         uint16_t num_ranges = 0;

@@ -102,22 +102,18 @@
  * ============================================================================ */
 
 /**
- * Enable BNEP packet compression.
- * When enabled, TinyPAN will use compressed Ethernet headers when possible.
- * This saves bandwidth but adds a small amount of code.
+ * BNEP Header Compression.
+ * 
+ * NOTE: For stability and compatibility with modern mobile OS networking stacks, 
+ * TinyPAN permanently uses General Ethernet headers (15 bytes). Compression 
+ * is disabled to prevent packet drops on globally routed traffic (DNS, TCP).
  */
 #ifndef TINYPAN_ENABLE_COMPRESSION
-#define TINYPAN_ENABLE_COMPRESSION          1
+#define TINYPAN_ENABLE_COMPRESSION          0
 #endif
 
-/**
- * Force uncompressed TX headers.
- * Some older tethering hosts (especially Android) have buggy BNEP compression
- * parsers that drop packets. Set this to 1 to force full 15-byte General Ethernet
- * headers for all outgoing packets, even if address compression is possible.
- */
 #ifndef TINYPAN_FORCE_UNCOMPRESSED_TX
-#define TINYPAN_FORCE_UNCOMPRESSED_TX       0
+#define TINYPAN_FORCE_UNCOMPRESSED_TX       1
 #endif
 
 /**
@@ -148,11 +144,11 @@
 
 /**
  * Enable heartbeat/link monitoring.
- * Not implemented. This flag and the associated config fields
- * (heartbeat_interval_ms, heartbeat_retries) are reserved for future use.
+ * Reserved for future use. The supervisor currently operates on transport-layer
+ * connectivity events.
  */
 #ifndef TINYPAN_ENABLE_HEARTBEAT
-#define TINYPAN_ENABLE_HEARTBEAT            1
+#define TINYPAN_ENABLE_HEARTBEAT            0
 #endif
 
 /**

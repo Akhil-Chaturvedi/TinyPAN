@@ -198,8 +198,14 @@ int tinypan_netif_init(void) {
     IP4_ADDR(&gateway, 0, 0, 0, 0);
     
 #if TINYPAN_USE_BLE_SLIP
+#if NO_SYS
     if (netif_add(&s_netif, &ipaddr, &netmask, &gateway, NULL,
                   tinypan_netif_init_callback, ip_input) == NULL) {
+#else
+    /* Thread Safety: Route SLIP packets into tcpip_thread via tcpip_input. */
+    if (netif_add(&s_netif, &ipaddr, &netmask, &gateway, NULL,
+                  tinypan_netif_init_callback, tcpip_input) == NULL) {
+#endif
 #else
     if (netif_add(&s_netif, &ipaddr, &netmask, &gateway, NULL,
                   tinypan_netif_init_callback, ethernet_input) == NULL) {
@@ -420,6 +426,8 @@ void tinypan_netif_drain_tx_queue(void) {
  * lwIP System Time Provider
  * ============================================================================ */
 
+#if NO_SYS
 u32_t sys_now(void) {
     return hal_get_tick_ms();
 }
+#endif

@@ -168,11 +168,11 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
         return ERR_CONN;
     }
     
-    /* QA Round 20: Real Zero-Copy TX Path.
+    /* BNEP Zero-Copy TX Path.
      * Instead of copying the whole payload, we allocate a small header-only pbuf,
      * write the BNEP header into it, and chain it to the original pbuf.
-     * We use pbuf_ref(p) to ensure the original pbuf is not freed by lwIP 
-     * while the HAL/queue is still using it (essential for TCP retransmission). */
+     * We use pbuf_ref(p) to ensure the original pbuf is not preserved by lwIP 
+     * while the HAL/queue is still using it. */
 
     uint8_t dst_addr[6], src_addr[6];
     uint16_t ethertype;
@@ -203,14 +203,20 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
      * We MUST NOT use pbuf_header(p, -14) because that mutates the original pbuf
      * which lwIP needs for TCP retransmissions! Instead, we create a light 
      * reference pbuf that points into the payload of the original frame. */
-    struct pbuf* payload_p = pbuf_alloc(PBUF_RAW, p->tot_len - (14 + eth_offset), PBUF_REF);
+    struct pbuf* payload_p = pbuf_alloc(PBUF_RAW, p->len - (14 + eth_offset), PBUF_REF);
     if (payload_p == NULL) {
         pbuf_free(h);
         return ERR_MEM;
     }
     payload_p->payload = (uint8_t*)p->payload + 14 + eth_offset;
     
-    /* Chain: [BNEP Header] -> [Payload Slice] */
+    /* Handle subsequent fragments of the IP packet chain. */
+    if (p->next != NULL) {
+        pbuf_ref(p->next);
+        pbuf_cat(payload_p, p->next);
+    }
+    
+    /* Chain: [BNEP Header] -> [Payload Slice] -> [Rest of Payload] */
     pbuf_chain(h, payload_p);
     
     /* We store 'p' in a parallel array to ensure it isn't freed by lwIP 

@@ -1,173 +1,104 @@
 # TinyPAN
 
-TinyPAN is a C library that implements a Bluetooth PAN (Personal Area Network) client for embedded systems. It provides two operating modes: native Bluetooth Classic tethering via BNEP, and BLE-based tethering via SLIP over a UART-style characteristic. Both modes bridge into the lwIP TCP/IP stack so the device can obtain an IP address via DHCP and communicate over IP.
+TinyPAN is a C library implementing a Bluetooth PAN (Personal Area Network) client for embedded systems. It supports native Bluetooth Classic tethering via BNEP and BLE-based tethering via SLIP over a UART-style characteristic. Both modes integrate with the lwIP TCP/IP stack to provide standard IP connectivity and DHCP support.
 
 ## Architecture: Dual-Mode Connectivity
 
-TinyPAN operates in two distinct modes depending on your hardware capabilities, configurable via `TINYPAN_USE_BLE_SLIP` in `tinypan_config.h`:
+TinyPAN operates in two modes, selectable via `TINYPAN_USE_BLE_SLIP` in `tinypan_config.h`:
 
 ### Mode A: Native Bluetooth Classic (BNEP)
-For microcontrollers with a Bluetooth Classic or Dual-Mode radio (e.g., ESP32, Raspberry Pi Pico W).
+Designed for microcontrollers with Bluetooth Classic or Dual-Mode radios (e.g., ESP32, Raspberry Pi Pico W).
 *   **Protocol:** lwIP -> BNEP encapsulation -> BT Classic L2CAP.
-*   **Phone side:** Uses the built-in iOS/Android Personal Hotspot. No companion app required.
+*   **Host Compatibility:** Compatible with standard iOS and Android Personal Hotspot. No companion app required.
 
 ### Mode B: BLE Companion App (SLIP)
-For BLE-only microcontrollers (e.g., nRF52, ESP32-C3/S3, STM32WB) that lack a Classic radio.
+Designed for BLE-only microcontrollers (e.g., nRF52, ESP32-C3/S3, STM32WB).
 *   **Protocol:** lwIP -> SLIP framing -> BLE UART characteristic (e.g., Nordic UART Service).
-*   **Phone side:** Requires a companion app that reads SLIP frames from the BLE pipe and injects the contained IPv4 packets into the OS networking stack via `VpnService` (Android) or `NetworkExtension` (iOS).
+*   **Host Compatibility:** Requires a companion app to bridge BLE SLIP frames into the host OS networking stack (via `VpnService` on Android or `NetworkExtension` on iOS).
 
 ### Transport Abstraction
 
-Mode selection at compile time determines which transport backend is compiled in, but the core modules (`tinypan_supervisor.c`, `tinypan_lwip_netif.c`) are transport-agnostic at the source level. Each backend implements the `tinypan_transport_t` interface defined in `src/tinypan_transport.h`. This interface consists of function pointers for initialization, connection events, incoming data dispatch, TX queue management, and lwIP output. `tinypan_transport_get()` returns the active backend.
+The core modules (`tinypan_supervisor.c`, `tinypan_lwip_netif.c`) are transport-agnostic. Each backend implements the `tinypan_transport_t` interface. Compile-time selection determines the active backend, which is accessed via `tinypan_transport_get()`.
 
-## Memory Management (BNEP Native Mode)
+## Memory Management
 
-The library targets constrained embedded platforms and strictly avoids dynamic heap allocation. 
+The library is designed for constrained environments and strictly avoids dynamic heap allocation in its core logic.
 
 ### Zero-Copy BNEP Path
-To maximize performance and minimize CPU overhead, the BNEP transport (`tinypan_bnep_transport.c`) implements a non-destructive zero-copy TX path utilizing lwIP's `pbuf_chain` mechanism. Instead of copying the entire 1500-byte IP payload, TinyPAN allocates a small BNEP header pbuf and chains it to a reference pbuf pointing into the original frame. 
+The BNEP transport (`tinypan_bnep_transport.c`) utilizes a zero-copy transmission path via lwIP `pbuf_chain`. For each outgoing IP frame, a small pbuf for the BNEP header is allocated and chained to the original IP payload. This avoids redundant 1500-byte protocol-layer copies while preserving the original pbuf for potential TCP retransmissions.
 
-**Engineering Reality**: This avoids redundant protocol-layer copies and reduces peak memory bandwidth. However, hardware-specific HALs (like ESP32) may still perform a single internal copy into an aligned "bounce buffer" if the radio's DMA controller requires contiguous or 4-byte aligned memory. This "one-copy" architecture is still significantly more efficient than the "two-copy" strategy used in earlier versions.
+**Engineering Note**: Hardware-specific HALs (e.g., ESP32) may perform a single internal copy into an aligned bounce buffer if the underlying DMA controller requires 4-byte alignment or contiguous memory.
 
 ### Queueing
-If the radio is busy (L2CAP queue full), the `pbuf` chain is placed into an internal 3-slot ring buffer. Queued frames are drained automatically when the radio signals readiness via `HAL_L2CAP_EVENT_CAN_SEND_NOW` or during the `tinypan_process()` polling cycle.
+If the radio is busy (L2CAP queue full), the `pbuf` chain is stored in a 3-slot ring buffer. Queued frames are drained automatically when the radio signals readiness via `HAL_L2CAP_EVENT_CAN_SEND_NOW` or during the `tinypan_process()` polling cycle.
 
-In SLIP mode, the SLIP transport backend parses incoming BLE bytes through a streaming SLIP FSM, building lwIP pbufs incrementally as bytes arrive. No intermediate ring buffer is used. When the SLIP `0xC0` END byte is received, the completed pbuf chain is dispatched directly to lwIP.
+In SLIP mode, an $O(N)$ encoder serializes full SLIP frames into a secondary buffer before transmission to maximize BLE throughput. The RX path uses a streaming FSM to build lwIP pbufs incrementally.
 
-The core loop is a single-threaded polling pump driven by `tinypan_process()`. For power-sensitive applications, `tinypan_get_next_timeout_ms()` returns the exact number of milliseconds until the next scheduled event (state machine timeout or lwIP timer), allowing the MCU to enter WFI instead of polling.
+## Performance and Scheduling
 
-Compiled size metrics (GCC, x86_64):
-* **RAM (bss + data):** ~192 bytes
-* **Flash (text):** ~14.5 KB
-* **Heap allocation:** None
+TinyPAN uses a single-threaded polling model driven by `tinypan_process()`. For power-constrained applications, `tinypan_get_next_timeout_ms()` provides the millisecond duration until the next scheduled internal event or lwIP timer, allowing the MCU to enter low-power sleep states.
+
+### Resource Metrics (Typical GCC, x86_64)
+* **RAM (bss + data):** ~256 bytes
+* **Flash (text):** ~15 KB
+* **Heap usage:** None (core)
 
 ## Repository Layout
 
 ```text
 TinyPAN/
-├── CMakeLists.txt           # Build configuration (fetches lwIP via FetchContent)
+├── CMakeLists.txt           # Build configuration
 ├── include/
 │   ├── tinypan.h            # Public API
-│   ├── tinypan_config.h     # Compile-time configuration (timeouts, queue sizes)
+│   ├── tinypan_config.h     # Compile-time configuration
 │   ├── tinypan_hal.h        # Hardware Abstraction Layer interface
-│   ├── lwipopts.h           # lwIP configuration overrides
-│   └── arch/                # lwIP architecture port (cc.h)
+│   ├── lwipopts.h           # lwIP configuration
+│   └── arch/                # lwIP architecture port
 ├── src/
-│   ├── tinypan.c            # Initialization, event routing, transport dispatch
-│   ├── tinypan_bnep.c       # BNEP protocol: frame building, parsing, state machine
-│   ├── tinypan_supervisor.c # Connection supervisor (IDLE -> CONNECTING -> BNEP_SETUP -> FILTER_WAIT -> DHCP -> ONLINE)
-│   ├── tinypan_lwip_netif.c # lwIP netif driver (delegates TX/RX to active transport)
-│   ├── tinypan_transport.h  # Transport interface definition (tinypan_transport_t)
-│   ├── tinypan_transport.c  # Transport factory (returns active backend via tinypan_transport_get)
-│   ├── tinypan_bnep_transport.c   # BNEP transport backend
-│   ├── tinypan_slip_transport.c   # SLIP transport backend
-│   └── tinypan_internal.h   # Internal cross-module prototypes
+│   ├── tinypan.c            # Initialization and event routing
+│   ├── tinypan_bnep.c       # BNEP protocol implementation
+│   ├── tinypan_supervisor.c # Connection state machine
+│   ├── tinypan_lwip_netif.c # lwIP netif driver
+│   ├── tinypan_transport.h  # Transport interface
+│   ├── tinypan_bnep_transport.c   # BNEP backend
+│   ├── tinypan_slip_transport.c   # SLIP backend
+│   └── tinypan_internal.h   # Internal prototypes
 ├── ports/
-│   ├── esp32_classic/       # Reference HAL for ESP-IDF (Bluedroid, BT Classic)
-│   └── zephyr_ble/          # Reference HAL for Zephyr RTOS (NUS, BLE SLIP)
-├── tools/
-│   ├── tinypan_diag.c       # Optional diagnostic module (link state, IP info)
-│   ├── slip_simulator.py    # Python script simulating a SLIP MCU over TCP
-│   ├── slip_client.py       # Python script decoding SLIP stream (companion app mock)
-│   └── flutter_slip_blueprint.dart # Dart SLIP decoder for Flutter companion app
+│   ├── esp32_classic/       # Reference HAL for ESP-IDF
+│   └── zephyr_ble/          # Reference HAL for Zephyr RTOS
 ├── tests/
-│   ├── test_bnep.c          # BNEP parser/builder unit tests
-│   ├── test_supervisor.c    # State machine and timeout tests
-│   ├── test_integration.c   # Full DHCP DORA flow over mock HAL
-│   └── dhcp_sim.c/.h        # DHCP packet builder/parser for test simulation
+│   ├── test_bnep.c          # Unit tests
+│   ├── test_supervisor.c    # State machine tests
+│   ├── test_integration.c   # DHCP flow over mock HAL
+│   └── dhcp_sim.c/.h        # DHCP simulation
 └── hal/
-    └── mock/                # Mock HAL for simulation-based testing
+    └── mock/                # Mock HAL for simulation
 ```
 
 ## Porting to Hardware
 
-To run TinyPAN on real hardware, implement the functions declared in `tinypan_hal.h`:
+Implement the functions declared in `tinypan_hal.h`:
 
-1.  **`hal_get_tick_ms()`** -- Return a monotonic millisecond counter (e.g., `xTaskGetTickCount() * portTICK_PERIOD_MS` on FreeRTOS, `k_uptime_get()` on Zephyr).
-2.  **`hal_bt_l2cap_send(data, len)`** -- Transmit a contiguous buffer over the Bluetooth channel. In BNEP mode this carries a BNEP header + payload over Classic L2CAP (PSM 0x000F). In SLIP mode this carries raw SLIP-escaped bytes over a BLE characteristic.
-3.  **`hal_bt_l2cap_connect(addr, psm, local_mtu)`** -- Initiate a connection. For BNEP, `local_mtu` should be at least 1691. For BLE SLIP, this may be a no-op if the MCU acts as a peripheral waiting for the phone to connect.
-4.  **`hal_bt_l2cap_can_send()`** -- Return whether the channel can accept a new frame.
-5.  **`hal_bt_l2cap_request_can_send_now()`** -- Request a `HAL_L2CAP_EVENT_CAN_SEND_NOW` callback when the channel becomes writable.
-6.  **Receive path** -- When the Bluetooth stack receives data, call the registered receive callback (see `hal_bt_l2cap_register_recv_callback`). In BNEP mode this delivers raw L2CAP frames. In SLIP mode this delivers raw BLE UART bytes.
+1.  **`hal_get_tick_ms()`**: Return a monotonic millisecond counter.
+2.  **`hal_bt_l2cap_send()`**: Transmit a buffer. In SLIP mode, this handles raw SLIP-escaped bytes.
+3.  **`hal_bt_l2cap_connect()`**: Initiate L2CAP connection.
+4.  **`hal_bt_l2cap_can_send()`**: Return internal controller readiness.
+5.  **`hal_bt_l2cap_request_can_send_now()`**: Request a callback when the controller is ready.
+6.  **RX Path**: Invoke the registered receive callback when data arrives from the radio.
 
-Reference implementations are provided in `ports/`:
-*   `ports/esp32_classic/` -- ESP-IDF (Bluedroid) for Bluetooth Classic / BNEP mode.
-*   `ports/zephyr_ble/` -- Zephyr RTOS (Nordic UART Service) for BLE / SLIP mode.
+### RTOS and Thread Safety
 
-### RTOS Threading
+TinyPAN is non-reentrant. All API calls and HAL callbacks must execute in the same thread context as `tinypan_process()`.
 
-TinyPAN is single-threaded and non-reentrant. All calls to TinyPAN API functions and all HAL callbacks must execute in the same thread context as `tinypan_process()`.
+Reference HALs (ESP32, Zephyr) demonstrate how to safely bridge events from Bluetooth stack tasks (or ISRs) into the application thread using OS primitives (Queues/Ring Buffers). This is critical to prevent corruption of lwIP internal state.
 
-If your platform delivers Bluetooth callbacks from a separate task or ISR (this is the case on ESP-IDF, Zephyr, and NimBLE), you must bounce events through an OS message queue and process them in the `tinypan_process()` thread. Calling TinyPAN or lwIP functions from an ISR will corrupt internal queues and state.
+## Design Constraints and Constants
 
-```c
-/* BT stack callback context (ISR or high-priority task) */
-void on_l2cap_rx_from_bt_stack(uint8_t* data, uint16_t len) {
-    bt_msg_t msg = { .data = clone_buffer(data, len), .len = len };
-    xQueueSend(xTinyPanQueue, &msg, 0);
-}
-
-/* Application task */
-void app_main_task(void* arg) {
-    while (1) {
-        tinypan_process();
-        uint32_t wait_ms = tinypan_get_next_timeout_ms();
-        bt_msg_t msg;
-        if (xQueueReceive(xTinyPanQueue, &msg, pdMS_TO_TICKS(wait_ms))) {
-            my_registered_tinypan_rx_callback(msg.data, msg.len, user_data);
-            free_buffer(msg.data);
-        }
-    }
-}
-```
-
-See `hal/mock/` for the simulation HAL and `ports/` for production reference implementations.
-
-## Building
-
-Requires CMake (>= 3.12), a C99 compiler (GCC, Clang, or MSVC), and Ninja or Make.
-
-The CMake configuration uses `FetchContent` to download lwIP (STABLE-2_1_3_RELEASE) and compiles it alongside TinyPAN. The lwIP source list is loaded from lwIP's own `Filelists.cmake` to avoid maintaining a hardcoded file list.
-
-```bash
-cmake -S . -B build
-cmake --build build
-```
-
-## Testing
-
-The test suite runs entirely in simulation using the mock HAL. No Bluetooth hardware is needed.
-
-```bash
-ctest --test-dir build -V
-```
-
-The suite includes:
-- **BNEPTests** — Validates BNEP header construction, parsing, and edge cases.
-- **SupervisorTests** — Verifies state machine transitions, timeout handling, and reconnection logic.
-- **IntegrationFlowTests** — Runs a complete DHCP DORA handshake: lwIP generates a real DHCP DISCOVER, the test harness responds with a simulated OFFER, lwIP sends a REQUEST, and the harness confirms with an ACK. The test passes when lwIP reports an assigned IP address.
-
-## Memory & Performance
-The library targets constrained embedded platforms (32KB-64KB RAM) and minimizes heap usage. 
-
-### BNEP Native Mode (Mode A)
-### BNEP Native Mode (Mode A)
-- **Non-Destructive Zero-Copy**: TinyPAN uses a non-destructive zero-copy strategy at the protocol layer. It calculates the BNEP header, prepends a small header pbuf, and chains it to a reference pbuf pointing to the IP payload. This preserves the original stack memory for retransmissions.
-- **Alignment & DMA**: TinyPAN sets `ETH_PAD_SIZE = 1` for optimal stack alignment. HAL implementations for DMA-driven radios must handle potentially unaligned frames (due to the 15-byte BNEP header) via internal aligned bounce buffers or scatter-gather descriptors.
-
-### BLE SLIP Mode (Mode B)
-- **Complexity**: O(N) streaming parser and encoder.
-- **Memory**: Dynamic chained pbuf growth (no massive preemptive allocations).
-
-## Design Constraints
-- **Concurrency**: Single-threaded and non-reentrant. All API calls and HAL callbacks must execute in the same task context as `tinypan_process()`.
-- **Queueing**: TX and Control queues are bounded to prevent heap exhaustion.
-- **Protocol Compliance**: Implements BNEP v1.0, DHCP, and ARP. Dynamic multicast filtering (Broadcast, IPv4 Multicast) is supported. IPv6/mDNS filtering is conditionally compiled based on `LWIP_IPV6`.
-- **HAL Requirements**: HAL implementations for DMA-driven hardware must provide an internal bounce buffer for unaligned L2CAP payloads.
-- **BNEP Robustness**: Control packets (Setup, Filter) are managed via a static internal queue to prevent message loss during rapid state transitions.
-- **Header Compression**: Set `TINYPAN_FORCE_UNCOMPRESSED_TX` to 1 if the tethering host has a non-compliant BNEP parser. This forces General Ethernet headers for all outgoing data.
-- **Heartbeat**: Reserved for future use. The supervisor currently ignores `heartbeat_interval_ms` and `heartbeat_retries`.
-
+* **BNEP Protocol**: Implements BNEP v1.0, DHCP, and ARP.
+* **Multicast**: Dynamic multicast filtering is supported. IPv6/mDNS filtering depends on `LWIP_IPV6`.
+* **Linker Compatibility**: `sys_now()` in `tinypan_lwip_netif.c` is guarded by `#if NO_SYS` to avoid conflicts on platforms (ESP-IDF, Zephyr) that provide their own timing providers.
+* **Header Compression**: For stability and compatibility with diverse networking stacks, TinyPAN uses General Ethernet headers (15 bytes) for all BNEP traffic. Compressed headers are not used in the TX path.
+* **Alignment**: TinyPAN sets `ETH_PAD_SIZE = 1` for optimal stack alignment. HAL implementations must handle potential unalignment in the 15-byte BNEP header.
 
 ## License
 
