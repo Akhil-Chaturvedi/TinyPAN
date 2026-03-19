@@ -50,18 +50,26 @@ static bool s_tx_busy = false;
 /* Used to align and pack unaligned or non-contiguous data for DMA safety */
 static uint8_t s_tx_aligned_buf[TINYPAN_L2CAP_MTU + 32];
 
+/* Static RX ring buffer: avoids malloc/free in the BT callback context,
+ * preventing heap fragmentation on ESP32's split DRAM architecture. */
+#ifndef TINYPAN_ESP_RX_RING_SLOTS
+#define TINYPAN_ESP_RX_RING_SLOTS   4
+#endif
+#ifndef TINYPAN_ESP_RX_SLOT_SIZE
+#define TINYPAN_ESP_RX_SLOT_SIZE    (TINYPAN_L2CAP_MTU + 16)
+#endif
+
+static uint8_t s_rx_ring_data[TINYPAN_ESP_RX_RING_SLOTS][TINYPAN_ESP_RX_SLOT_SIZE];
+static uint16_t s_rx_ring_len[TINYPAN_ESP_RX_RING_SLOTS];
+static volatile uint8_t s_rx_ring_head = 0; /* Written by BT task */
+static volatile uint8_t s_rx_ring_tail = 0; /* Read by app task */
+
 typedef struct {
     int event_id;
     int status;
 } esp_event_msg_t;
 
-typedef struct {
-    uint8_t* data;
-    uint16_t len;
-} esp_rx_msg_t;
-
 static QueueHandle_t s_event_queue = NULL;
-static QueueHandle_t s_rx_queue = NULL;
 
 /* ============================================================================
  * ESP-IDF L2CAP Callbacks
@@ -96,19 +104,18 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
             break;
 
         case ESP_BT_L2CAP_DATA_IND_EVT:
-            /* Thread Safety Fix: Allocate a standard heap buffer, pass pointer to queue, 
-             * and free it safely in the hal_bt_poll() loop on the user thread. */
+            /* Static Ring Buffer: Copy incoming data directly into a pre-allocated
+             * slot, avoiding malloc/free in the BT controller task. */
             if (param->data_ind.len > 0 && param->data_ind.data) {
-                uint8_t* buf = malloc(param->data_ind.len);
-                if (buf != NULL) {
-                    memcpy(buf, param->data_ind.data, param->data_ind.len);
-                    esp_rx_msg_t rx_msg = { .data = buf, .len = param->data_ind.len };
-                    if (xQueueSend(s_rx_queue, &rx_msg, 0) != pdTRUE) {
-                        free(buf);
-                        ESP_LOGW(TAG, "RX Queue full, dropped inbound L2CAP frame");
-                    }
+                uint8_t next_head = (s_rx_ring_head + 1) % TINYPAN_ESP_RX_RING_SLOTS;
+                if (next_head != s_rx_ring_tail) {
+                    uint16_t copy_len = (param->data_ind.len <= TINYPAN_ESP_RX_SLOT_SIZE)
+                                        ? param->data_ind.len : TINYPAN_ESP_RX_SLOT_SIZE;
+                    memcpy(s_rx_ring_data[s_rx_ring_head], param->data_ind.data, copy_len);
+                    s_rx_ring_len[s_rx_ring_head] = copy_len;
+                    s_rx_ring_head = next_head;
                 } else {
-                    ESP_LOGW(TAG, "Failed to allocate standard heap for RX");
+                    ESP_LOGW(TAG, "RX ring full, dropped inbound L2CAP frame");
                 }
             }
             break;
@@ -146,15 +153,14 @@ void hal_bt_poll(void) {
         }
     }
 
-    /* Drain L2CAP data */
-    esp_rx_msg_t rx_msg;
-    while (xQueueReceive(s_rx_queue, &rx_msg, 0) == pdTRUE) {
-        if (s_recv_cb && rx_msg.data) {
-            s_recv_cb(rx_msg.data, rx_msg.len, s_recv_cb_data);
+    /* Drain L2CAP data from static ring buffer */
+    while (s_rx_ring_tail != s_rx_ring_head) {
+        if (s_recv_cb) {
+            s_recv_cb(s_rx_ring_data[s_rx_ring_tail],
+                      s_rx_ring_len[s_rx_ring_tail],
+                      s_recv_cb_data);
         }
-        if (rx_msg.data) {
-            free(rx_msg.data);
-        }
+        s_rx_ring_tail = (s_rx_ring_tail + 1) % TINYPAN_ESP_RX_RING_SLOTS;
     }
 }
 
@@ -166,7 +172,10 @@ int hal_bt_init(void) {
     if (s_hal_initialized) return 0;
 
     s_event_queue = xQueueCreate(TINYPAN_ESP_EVENT_QUEUE_SIZE, sizeof(esp_event_msg_t));
-    s_rx_queue = xQueueCreate(TINYPAN_ESP_RX_QUEUE_SIZE, sizeof(esp_rx_msg_t));
+
+    /* Reset static RX ring buffer */
+    s_rx_ring_head = 0;
+    s_rx_ring_tail = 0;
 
     esp_err_t ret = esp_bt_l2cap_register_callback(esp_l2cap_cb);
     if (ret != ESP_OK) return -1;
@@ -188,7 +197,9 @@ void hal_bt_deinit(void) {
     esp_bt_l2cap_deinit();
     
     if (s_event_queue) vQueueDelete(s_event_queue);
-    if (s_rx_queue) vQueueDelete(s_rx_queue);
+    
+    s_rx_ring_head = 0;
+    s_rx_ring_tail = 0;
     
     s_hal_initialized = false;
 }

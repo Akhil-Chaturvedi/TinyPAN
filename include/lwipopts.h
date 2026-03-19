@@ -21,6 +21,10 @@
 
 #include "tinypan_config.h"
 #if TINYPAN_USE_BLE_SLIP
+/* LWIP_HAVE_SLIPIF enables lwIP's SLIP header definitions but TinyPAN does NOT
+ * use lwIP's built-in slipif.c transport. Our SLIP operates over asynchronous
+ * BLE NUS characteristics, not POSIX serial ports, so we implement a custom
+ * streaming encoder/decoder in tinypan_slip_transport.c. */
 #define LWIP_HAVE_SLIPIF            1
 #define SLIP_RX_FROM_ISR            1
 #else

@@ -49,9 +49,8 @@ struct z_event_msg {
     int status;
 };
 
-/* Because Zephyr NUS gives us a stream of bytes, we just copy them into a 
-   flat ring buffer protected by a mutex, rather than allocating blocks.
-   The core TinyPAN `s_rx_queue` will eventually absorb it. */
+/* NUS delivers a raw byte stream. We copy incoming bytes into a lock-free
+   ring buffer so the BLE callback returns immediately without blocking. */
 K_MSGQ_DEFINE(s_zephyr_event_q, sizeof(struct z_event_msg), 16, 4);
 
 /* Concurrency: Lock-free Zephyr Ring Buffer replaces K_MUTEX_DEFINE to prevent stalls */

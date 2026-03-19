@@ -111,7 +111,7 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
         /* Copy non-escaped chunk directly into pbuf chain */
         if (chunk_len > 0) {
             uint16_t written = 0;
-            while (written < chunk_idx && s_slip_rx_total_offset < TINYPAN_MAX_FRAME_SIZE) {
+            while (written < chunk_len && s_slip_rx_total_offset < TINYPAN_MAX_FRAME_SIZE) {
                 uint16_t space = s_slip_rx_curr_pbuf->len - s_slip_rx_curr_offset;
                 if (space == 0) {
                     /* Current segment is full, allocate next one if not and if we are within limits */

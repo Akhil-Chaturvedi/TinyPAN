@@ -21,7 +21,7 @@ Targeted at BLE-only controllers (e.g., nRF52, ESP32-C3).
 TinyPAN is optimized for highly constrained environments and avoids dynamic heap allocation in its core logic.
 
 ### BNEP Zero-Copy Transmission
-The BNEP transport (`tinypan_bnep_transport.c`) implements a zero-copy path for outgoing frames. It uses lwIP `pbuf_chain` to prepend BNEP headers to existing IP payloads without re-allocating or copying the frame data. This preserves the original payload for protocol-layer operations like TCP retransmission.
+The BNEP transport (`tinypan_bnep_transport.c`) implements a true zero-copy path for outgoing frames. lwIP pre-allocates `PBUF_LINK_ENCAPSULATION_HLEN` (15) bytes of headroom in every outgoing packet. At transmission time, `pbuf_header()` expands backwards into that reserved space to write the BNEP header in-place, then restores the pointer after the send completes. No additional pbuf allocations, copies, or chains are created.
 
 ### Streaming SLIP Encoder
 The SLIP transport uses an on-the-fly streaming encoder. Instead of buffering an entire escaped frame, it processes incoming `pbuf` chains in small chunks (128 bytes), minimizing peak RAM usage during transmission.
@@ -43,7 +43,9 @@ Integration with a specific Bluetooth stack requires implementing the `tinypan_h
 5. **RX Integration**: The HAL must invoke the registered `hal_l2cap_recv_callback_t` when data is received from the L2CAP channel.
 
 ### Threading and Reentrancy
-TinyPAN is non-reentrant. All library interactions—including API calls and HAL callbacks—must be synchronized to the same thread context as `tinypan_process()`. The provided reference ports (ESP32, Zephyr) demonstrate safe event bridging using RTOS queues.
+TinyPAN is non-reentrant. All library interactions -- including API calls and HAL callbacks -- must be synchronized to the same thread context as `tinypan_process()`. The provided reference ports (ESP32, Zephyr) demonstrate safe event bridging using RTOS queues and static ring buffers.
+
+`tinypan_get_next_timeout_ms()` returns the maximum safe sleep duration based on protocol timers. On RTOS platforms, the HAL should additionally use native signaling primitives (semaphores, event groups) to wake the processing thread immediately when a packet arrives from the radio, rather than relying solely on this timeout.
 
 ## Protocol and Compliance
 

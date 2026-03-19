@@ -293,9 +293,9 @@ void tinypan_netif_input(const uint8_t* dst_addr, const uint8_t* src_addr,
         return;
     }
     
-    /* In refactored transport model, the SLIP bytes are fed automatically into slipif
-       via the transport layer `handle_incoming` -> slipif_process_rxqueue.
-       This function is now ONLY meant to inject Ethernet frames into lwIP (from BNEP). */
+    /* In SLIP mode, the transport layer's handle_incoming callback feeds raw
+       bytes directly into the streaming SLIP FSM (tinypan_slip_transport.c).
+       This function is only used to inject Ethernet frames into lwIP (from BNEP). */
     
     if (dst_addr == NULL || src_addr == NULL) {
         return;
