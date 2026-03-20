@@ -5,15 +5,15 @@
  * This file implements the TinyPAN `tinypan_hal.h` interface for an ESP32
  * running the official ESP-IDF framework with the Bluedroid host stack.
  * 
- * Target: Custom PAN Client (BNEP) over Classic Bluetooth (BR/EDR).
+ * Target: PAN Client (BNEP) over Classic Bluetooth (BR/EDR).
  * 
  * @note Thread Safety
- * The ESP-IDF Bluetooth stack executes all callbacks (like `esp_bt_l2cap_cb`)
- * on a dedicated internal FreeRTOS task (`btu_task`). However, TinyPAN is
- * strictly a single-threaded synchronous library.
- * To safely bridge this, this HAL uses a FreeRTOS `QueueHandle_t` to funnel
- * incoming data and events from the BT task into the application task where
- * `tinypan_process()` is polled.
+ * The ESP-IDF Bluetooth stack executes all callbacks (e.g. `esp_l2cap_cb`)
+ * on a dedicated internal FreeRTOS task (`btu_task`). TinyPAN is strictly
+ * single-threaded. Incoming data is bridged to the application thread via
+ * a static lock-free ring buffer (`s_rx_ring_data`). Events (connect/disconnect)
+ * are bridged via a small FreeRTOS queue. Memory barriers (`portMEMORY_BARRIER`)
+ * guard head/tail index updates for correct multi-core visibility.
  */
 
 #include "tinypan_hal.h"
@@ -113,6 +113,9 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
                                         ? param->data_ind.len : TINYPAN_ESP_RX_SLOT_SIZE;
                     memcpy(s_rx_ring_data[s_rx_ring_head], param->data_ind.data, copy_len);
                     s_rx_ring_len[s_rx_ring_head] = copy_len;
+                    
+                    /* Memory Barrier: Ensure data is written before updating head */
+                    portMEMORY_BARRIER();
                     s_rx_ring_head = next_head;
                 } else {
                     ESP_LOGW(TAG, "RX ring full, dropped inbound L2CAP frame");
@@ -160,6 +163,9 @@ void hal_bt_poll(void) {
                       s_rx_ring_len[s_rx_ring_tail],
                       s_recv_cb_data);
         }
+        
+        /* Memory Barrier: Ensure data is read before updating tail */
+        portMEMORY_BARRIER();
         s_rx_ring_tail = (s_rx_ring_tail + 1) % TINYPAN_ESP_RX_RING_SLOTS;
     }
 }

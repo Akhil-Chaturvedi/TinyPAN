@@ -40,11 +40,12 @@
 #define LWIP_SOCKET                 0
 #define LWIP_NETCONN                0
 #define LWIP_STATS                  0
-#define LWIP_DEBUG                  1
+#define LWIP_DEBUG                  0
 
-#define DHCP_DEBUG                  LWIP_DBG_ON
-#define ETHARP_DEBUG                LWIP_DBG_ON
-#define UDP_DEBUG                   LWIP_DBG_ON
+/* Uncomment and set to LWIP_DBG_ON to enable per-module lwIP diagnostic output: */
+/* #define DHCP_DEBUG               LWIP_DBG_ON */
+/* #define ETHARP_DEBUG             LWIP_DBG_ON */
+/* #define UDP_DEBUG                LWIP_DBG_ON */
 
 /* Memory configuration */
 #define MEM_ALIGNMENT               4

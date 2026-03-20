@@ -81,9 +81,9 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
 
     while (p < end) {
         if (s_slip_rx_pbuf == NULL) {
-            /* Memory Management: Use incremental pbuf allocation during SLIP 
-             * streaming to reduce peak RAM pressure. */
-            s_slip_rx_pbuf = pbuf_alloc(PBUF_RAW, 0, PBUF_POOL); 
+            /* Memory Management: Allocate a full pool segment. lwIP sets len/tot_len
+             * to 0 if we pass 0 to pbuf_alloc, which would cause an infinite loop. */
+            s_slip_rx_pbuf = pbuf_alloc(PBUF_RAW, PBUF_POOL_BUFSIZE, PBUF_POOL); 
             if (s_slip_rx_pbuf == NULL) return; /* OOM */
             s_slip_rx_curr_pbuf = s_slip_rx_pbuf;
             s_slip_rx_curr_offset = 0;
@@ -116,7 +116,7 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                 if (space == 0) {
                     /* Current segment is full, allocate next one if not and if we are within limits */
                     if (s_slip_rx_total_offset >= TINYPAN_MAX_FRAME_SIZE) break;
-                    struct pbuf* next = pbuf_alloc(PBUF_RAW, 0, PBUF_POOL);
+                    struct pbuf* next = pbuf_alloc(PBUF_RAW, PBUF_POOL_BUFSIZE, PBUF_POOL);
                     if (next == NULL) { /* OOM */
                         pbuf_free(s_slip_rx_pbuf);
                         s_slip_rx_pbuf = NULL;
@@ -232,15 +232,37 @@ void slip_transport_drain_tx_queue(void) {
             while (s_slip_tx_current != NULL && chunk_idx < sizeof(s_slip_chunk_buf) - 2) {
                 uint8_t* payload = (uint8_t*)s_slip_tx_current->payload;
                 while (s_slip_tx_offset < s_slip_tx_current->len && chunk_idx < sizeof(s_slip_chunk_buf) - 2) {
-                    uint8_t c = payload[s_slip_tx_offset++];
-                    if (c == SLIP_END) {
-                        s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
-                        s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_END;
-                    } else if (c == SLIP_ESC) {
-                        s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
-                        s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_ESC;
+                    /* Bulk Copy Optimization: Use memchr to find next escape char */
+                    uint16_t rem_payload = s_slip_tx_current->len - s_slip_tx_offset;
+                    uint16_t rem_chunk = (sizeof(s_slip_chunk_buf) - 2) - chunk_idx;
+                    uint16_t scan_len = (rem_payload < rem_chunk) ? rem_payload : rem_chunk;
+                    
+                    const uint8_t* next_esc = memchr(payload + s_slip_tx_offset, SLIP_END, scan_len);
+                    const uint8_t* next_alt = memchr(payload + s_slip_tx_offset, SLIP_ESC, scan_len);
+                    if (next_alt && (!next_esc || next_alt < next_esc)) next_esc = next_alt;
+
+                    if (next_esc) {
+                        uint16_t safe_copy = (uint16_t)(next_esc - (payload + s_slip_tx_offset));
+                        if (safe_copy > 0) {
+                            memcpy(s_slip_chunk_buf + chunk_idx, payload + s_slip_tx_offset, safe_copy);
+                            chunk_idx += safe_copy;
+                            s_slip_tx_offset += safe_copy;
+                        }
+                        
+                        /* Escape the special character */
+                        uint8_t c = payload[s_slip_tx_offset++];
+                        if (c == SLIP_END) {
+                            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
+                            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_END;
+                        } else {
+                            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
+                            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_ESC;
+                        }
                     } else {
-                        s_slip_chunk_buf[chunk_idx++] = c;
+                        /* No escape characters in the remaining scan range */
+                        memcpy(s_slip_chunk_buf + chunk_idx, payload + s_slip_tx_offset, scan_len);
+                        chunk_idx += scan_len;
+                        s_slip_tx_offset += scan_len;
                     }
                 }
                 if (s_slip_tx_offset >= s_slip_tx_current->len) {

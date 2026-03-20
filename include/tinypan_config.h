@@ -30,11 +30,11 @@
 #endif
 
 /**
- * Size limit for a single incoming SLIP frame (bytes).
- * The SLIP transport backend builds pbuf chains from raw incoming bytes
- * using a streaming FSM; it does not use a static ring buffer.
- * This define is retained for integrator reference but is not used
- * internally. Unused in BNEP mode.
+ * Reference size for a single incoming SLIP or BNEP frame (bytes).
+ * This value is NOT used by the library internally. The SLIP transport
+ * builds pbuf chains dynamically from pool segments; there is no static
+ * receive buffer in the core. Integrators writing a custom HAL may use
+ * this value to size their own inbound staging buffers.
  */
 #ifndef TINYPAN_RX_BUFFER_SIZE
 #define TINYPAN_RX_BUFFER_SIZE          1700

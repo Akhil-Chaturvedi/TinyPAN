@@ -287,8 +287,8 @@ int bnep_parse_header(const uint8_t* data, uint16_t len,
             break;
             
         case BNEP_PKT_TYPE_CONTROL:
-            /* Variable length, minimum: Type(1) + ControlType(1) = 2 */
-            *header_len = 2;
+            /* Type(1). Extension headers might follow. */
+            *header_len = 1;
             break;
             
         case BNEP_PKT_TYPE_COMPRESSED_ETHERNET:
@@ -600,7 +600,9 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
         return;
     }
     
-    uint8_t control_type = data[1];
+    /* In BNEP, the Control Type is at the start of the payload
+     * (after the BNEP header and any extension headers). */
+    uint8_t control_type = data[0];
     
     switch (control_type) {
         case BNEP_CTRL_SETUP_CONNECTION_REQUEST:
@@ -614,7 +616,7 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
             TINYPAN_LOG_DEBUG("Received setup connection response");
             if (s_state == BNEP_STATE_WAIT_FOR_CONNECTION_RESPONSE) {
                 bnep_setup_response_t response;
-                if (bnep_parse_setup_response(&data[1], len - 1, &response) == 0) {
+                if (bnep_parse_setup_response(data, len, &response) == 0) {
                     TINYPAN_LOG_INFO("BNEP setup response: 0x%04X", response.response_code);
                     
                     if (response.response_code == BNEP_SETUP_RESPONSE_SUCCESS) {
@@ -738,9 +740,26 @@ void bnep_handle_incoming(const uint8_t* data, uint16_t len) {
         return;
     }
     
+    uint32_t ext_offset = header_len;
+    while (has_ext) {
+        if (ext_offset + 2 > len) {
+            TINYPAN_LOG_WARN("Packet too short for BNEP extensions");
+            return;
+        }
+        uint8_t ext_type = data[ext_offset];
+        uint8_t ext_len = data[ext_offset + 1];
+        has_ext = (ext_type & BNEP_EXT_HEADER_FLAG) != 0;
+        ext_offset += 2 + ext_len;
+    }
+
+    if (ext_offset > len) {
+        TINYPAN_LOG_WARN("BNEP extensions exceed packet length");
+        return;
+    }
+
     switch (pkt_type) {
         case BNEP_PKT_TYPE_CONTROL:
-            handle_control_packet(data, len);
+            handle_control_packet(&data[ext_offset], len - (uint16_t)ext_offset);
             break;
             
         case BNEP_PKT_TYPE_GENERAL_ETHERNET:

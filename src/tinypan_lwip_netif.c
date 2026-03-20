@@ -244,20 +244,15 @@ int tinypan_netif_start_dhcp(void) {
         return -1;
     }
     
-    static bool s_dhcp_started = false;
-    if (s_dhcp_started) {
-        return 0; /* Auto-renewed by link_up */
-    }
-    
     TINYPAN_LOG_INFO("netif: Starting DHCP...");
     
+    dhcp_stop(&s_netif);
     err_t err = dhcp_start(&s_netif);
     if (err != ERR_OK) {
         TINYPAN_LOG_ERROR("netif: DHCP start failed: %d", err);
         return -1;
     }
     
-    s_dhcp_started = true;
     return 0;
 }
 

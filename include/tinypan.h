@@ -42,15 +42,15 @@ typedef uint8_t tinypan_bd_addr_t[6];
  */
 typedef enum {
     TINYPAN_STATE_IDLE = 0,         /**< Not started, waiting */
-    TINYPAN_STATE_SCANNING,         /**< Scanning for devices (reserved, not implemented) */
+    TINYPAN_STATE_SCANNING,         /**< Reserved, not implemented */
     TINYPAN_STATE_CONNECTING,       /**< L2CAP connection in progress */
     TINYPAN_STATE_BNEP_SETUP,       /**< BNEP setup handshake in progress */
-    TINYPAN_STATE_BNEP_FILTER_WAIT, /**< Waiting for BNEP multicast filter response from NAP */
-    TINYPAN_STATE_DHCP,             /**< L2CAP connected (BNEP negotiated or SLIP ready), running DHCP */
-    TINYPAN_STATE_ONLINE,           /**< Fully connected, IP acquired */
-    TINYPAN_STATE_STALLED,          /**< Link health check failed (reserved, not implemented) */
-    TINYPAN_STATE_RECONNECTING,     /**< Disconnected, attempting reconnect */
-    TINYPAN_STATE_ERROR             /**< Permanent failure */
+    TINYPAN_STATE_BNEP_FILTER_WAIT, /**< Waiting for BNEP multicast filter response */
+    TINYPAN_STATE_DHCP,             /**< Transport negotiated, DHCP in progress */
+    TINYPAN_STATE_ONLINE,           /**< IP acquired, data transfer ready */
+    TINYPAN_STATE_STALLED,          /**< Reserved, not implemented */
+    TINYPAN_STATE_RECONNECTING,     /**< Connection lost, attempting reconnect */
+    TINYPAN_STATE_ERROR             /**< Max reconnect attempts exhausted */
 } tinypan_state_t;
 
 /**
