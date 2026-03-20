@@ -21,19 +21,20 @@ Targeted at BLE-only controllers (e.g., nRF52, ESP32-C3).
 ## Memory Design
 
 ### BNEP Transmission
-The BNEP transport (`tinypan_bnep_transport.c`) uses `pbuf_header()` to write the BNEP header in-place into the headroom reserved by lwIP (`PBUF_LINK_ENCAPSULATION_HLEN = 15` bytes). No additional pbuf allocations or memory copies are performed in the transport layer. The HAL layer may still require linearization into a contiguous buffer depending on the radio controller's DMA requirements.
+The BNEP transport (`tinypan_bnep_transport.c`) uses `pbuf_header()` to write the BNEP header in-place into the headroom reserved by lwIP (`PBUF_LINK_ENCAPSULATION_HLEN = 15` bytes). For standard PANU-to-NAP connections, TinyPAN dynamically selects **BNEP Compressed Ethernet** (Type 0x02), saving 12 bytes of overhead per IP packet. General Ethernet (Type 0x00) is used as a fallback for non-standard topologies.
 
 ### SLIP Encoder
 The SLIP transport encodes outgoing `pbuf` chains on the fly using a `memchr`-based scan into a 128-byte staging buffer. Contiguous runs of non-escape bytes are copied in bulk; only bytes requiring escaping (`0xC0`, `0xDB`) are handled individually. The original pbuf is held by reference (`pbuf_ref`) and freed after transmission, avoiding any intermediate heap allocation.
 
 ### SLIP Decoder
-Incoming SLIP bytes are accumulated directly into pool-allocated (`PBUF_POOL`) segments via a streaming FSM. A single incoming frame is limited to 2 pool segments (~3 KB) regardless of `TINYPAN_MAX_FRAME_SIZE`. This prevents a malformed or incomplete SLIP stream from exhausting the pool and stalling other stack operations (ARP/DHCP). When a frame-end marker (`0xC0`) is received, the last segment is trimmed with `pbuf_realloc` to the actual data length.
+Incoming SLIP bytes are accumulated directly into pool-allocated (`PBUF_POOL`) segments via a streaming FSM. A single incoming frame is limited to 2 pool segments (~3 KB). If a frame exceeds this limit, the buffer is freed and the FSM enters a "seek-to-end" state, discarding subsequent bytes until the next `SLIP_END` delimiter is found; this prevents a malformed frame from corrupting the next valid frame in the same stream.
 
 ### Resource Metrics (Typical 32-bit MCU)
 - **Library BSS/Data:** < 400 bytes (core and transport state, excluding lwIP pool)
 - **Flash (Text):** ~12-18 KB, mode dependent
-- **lwIP Heap:** 4 KB, configurable via `MEM_SIZE` in `lwipopts.h`
-- **HAL Buffer:** 1.6-2.0 KB static bounce buffer in the provided ESP32/Zephyr ports, required to linearize scatter-gather iovec arrays for DMA
+- **lwIP Heap/Pool:** Configurable; defaults to 4 byte-aligned segments (6.8KB pool) plus 4KB heap.
+- **ESP32 HAL BSS:** ~7.0 KB static RAM (4 x 1.7KB RX slots plus TX bounce buffer). Configurable via `TINYPAN_ESP_RX_RING_SLOTS`.
+- **Zephyr HAL BSS:** ~2.5 KB static RAM (1.9KB RX ring buffer plus events).
 
 ## Hardware Abstraction Layer (HAL)
 
@@ -52,10 +53,10 @@ TinyPAN is non-reentrant. All library interactions -- including API calls and HA
 
 ## Protocol Implementation Notes
 
-- **BNEP Version:** BNEP v1.0, General Ethernet packet format (type byte `0x00`).
-- **Header Compression:** Disabled. Uncompressed 15-byte Ethernet headers are used for all outgoing traffic. This maximizes compatibility with mobile OS networking stacks.
-- **BNEP Control Packets:** Extension headers are parsed and skipped before control type dispatch, per the BNEP specification.
-- **Multicast Filtering:** A multicast address filter is sent after BNEP setup, before DHCP is initiated.
+- **BNEP Version:** v1.0, supporting General and Compressed Ethernet formats.
+- **Header Compression:** Dynamically enabled for PANU-to-NAP flows to minimize radio-on time and latency.
+- **BNEP Control Packets:** Extension headers are parsed and skipped before control type dispatch.
+- **Multicast Filtering:** Automatically sent after BNEP setup before DHCP.
 - **DHCP:** Managed by lwIP's DHCP client. The netif stack is reset on disconnect; `dhcp_stop` is called before `dhcp_start` on reconnection to force a fresh lease discovery.
 
 ## License

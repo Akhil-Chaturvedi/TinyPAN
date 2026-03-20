@@ -568,13 +568,21 @@ bool bnep_drain_control_tx_queue(void) {
 }
 
 uint8_t bnep_get_ethernet_header_len(const uint8_t* dst_addr, const uint8_t* src_addr) {
-    (void)dst_addr;
-    (void)src_addr;
-    
-    /* BNEP Protocol Compliance: Always use General Ethernet Format (Type 0x00) 
-     * to ensure compatibility with mobile OS networking stacks that may expect 
-     * the router MAC address in the source field. */
-    return 15;
+    /* Use BNEP Compressed Ethernet (type 0x02, 3 bytes) when transmitting a frame
+     * where both addresses match the established PANU<->NAP session addresses.
+     * In this case both sides already know the addresses from the BD_ADDR exchange,
+     * so including them again is redundant bandwidth.  Saves 12 bytes per packet
+     * on a ~300-700 kbps Classic BT link, reducing both latency and radio-on time.
+     *
+     * Fall back to General Ethernet (type 0x00, 15 bytes) for any frame whose
+     * addresses do not match — though in practice all outbound lwIP frames go to
+     * the NAP's MAC address constructed at session setup. */
+    if (dst_addr != NULL && src_addr != NULL &&
+        memcmp(dst_addr,  s_remote_addr, BNEP_ETHER_ADDR_LEN) == 0 &&
+        memcmp(src_addr,  s_local_addr,  BNEP_ETHER_ADDR_LEN) == 0) {
+        return 3; /* Compressed Ethernet: type(1) + EtherType(2) */
+    }
+    return 15; /* General Ethernet: type(1) + dst(6) + src(6) + EtherType(2) */
 }
 
 void bnep_write_ethernet_header(uint8_t* buffer, uint8_t header_len,
@@ -607,9 +615,12 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
     switch (control_type) {
         case BNEP_CTRL_SETUP_CONNECTION_REQUEST:
             TINYPAN_LOG_DEBUG("Received setup connection request");
-            /* We're acting as PANU (client), not server. 
-               If we receive a request, send "not allowed" */
-            bnep_send_setup_response(BNEP_SETUP_RESPONSE_NOT_ALLOWED);
+            /* We are acting as PANU (client), not a server.
+             * If we receive a setup request, reject it. */
+            if (bnep_send_setup_response(BNEP_SETUP_RESPONSE_NOT_ALLOWED) != 0) {
+                TINYPAN_LOG_WARN("Could not queue setup response (queue full); "
+                                 "peer may time out and drop the link");
+            }
             break;
             
         case BNEP_CTRL_SETUP_CONNECTION_RESPONSE:
@@ -636,8 +647,8 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
             break;
             
         case BNEP_CTRL_FILTER_NET_TYPE_SET:
-            /* BNEP Protocol Compliance: Acknowledge filter requests with 'Success' 
-               to prevent session termination by host OS stacks (e.g. iOS) 
+            /* BNEP Protocol Compliance: Acknowledge filter requests with 'Success'
+               to prevent session termination by host OS stacks (e.g. iOS)
                that require a valid response to keep the link active. */
             TINYPAN_LOG_DEBUG("Received filter set request, acknowledging Success");
             {

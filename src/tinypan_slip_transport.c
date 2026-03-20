@@ -144,7 +144,17 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                         TINYPAN_LOG_ERROR("slip_rx: Frame exceeded segment limit, dropping");
                         pbuf_free(s_slip_rx_pbuf);
                         s_slip_rx_pbuf = NULL;
-                        return;
+                        s_slip_rx_curr_pbuf = NULL;
+                        s_slip_rx_curr_offset = 0;
+                        s_slip_rx_total_offset = 0;
+                        s_slip_rx_seg_count = 0;
+                        s_slip_rx_escape = false;
+                        /* Re-sync the FSM: skip remaining bytes of this oversized 
+                         * frame until the next SLIP_END delimiter. Any valid 
+                         * frame that follows in this same notification buffer 
+                         * will then be processed correctly. */
+                        while (p < end && *p != SLIP_END) p++;
+                        continue;
                     }
 
                     struct pbuf* next = pbuf_alloc(PBUF_RAW, PBUF_POOL_BUFSIZE, PBUF_POOL);
@@ -169,11 +179,19 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
             p += written;
             
             if (written < chunk_len && s_slip_rx_total_offset >= TINYPAN_MAX_FRAME_SIZE) {
-                /* Frame too large, drop it */
+                /* Frame too large: drop the buffer and seek forward to the next
+                 * SLIP_END so any valid frames that follow in this same
+                 * notification batch are not silently discarded. */
                 pbuf_free(s_slip_rx_pbuf);
                 s_slip_rx_pbuf = NULL;
-                s_slip_rx_escape = false; /* Reset state on overflow */
-                return;
+                s_slip_rx_curr_pbuf = NULL;
+                s_slip_rx_curr_offset = 0;
+                s_slip_rx_total_offset = 0;
+                s_slip_rx_seg_count = 0;
+                s_slip_rx_escape = false;
+                p += (chunk_len - written); /* advance past unwritten bytes */
+                while (p < end && *p != SLIP_END) p++;
+                continue; /* Back to outer while(p < end) */
             }
         }
 

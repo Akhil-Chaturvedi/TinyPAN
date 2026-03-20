@@ -43,9 +43,12 @@ static hal_l2cap_event_callback_t s_event_cb = NULL;
 static void* s_event_cb_data = NULL;
 
 static bool s_hal_initialized = false;
-static bool s_is_connected = false;
+/* Cross-task state: written by the BTU callback task, read by the app task.
+ * volatile prevents the compiler from caching these in a register across
+ * polling iterations on the dual-core Xtensa LX6. */
+static volatile bool s_is_connected = false;
 static uint32_t s_l2cap_handle = 0;
-static bool s_tx_busy = false;
+static volatile bool s_tx_busy = false;
 
 /* Used to align and pack unaligned or non-contiguous data for DMA safety */
 static uint8_t s_tx_aligned_buf[TINYPAN_L2CAP_MTU + 32];

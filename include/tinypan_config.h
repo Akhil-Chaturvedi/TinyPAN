@@ -105,17 +105,15 @@
 /**
  * BNEP Header Compression.
  * 
- * For optimal compatibility with diverse mobile OS networking stacks, 
- * uncompressed General Ethernet headers (15 bytes) are used for all 
- * outgoing traffic. This ensures global IP packets (DNS, TCP) are correctly 
- * routed by the host device.
+ * TinyPAN supports BNEP Compressed Ethernet (Type 0x02) for PANU-to-NAP flows,
+ * which saves 12 bytes per IP packet.
  */
 #ifndef TINYPAN_ENABLE_COMPRESSION
-#define TINYPAN_ENABLE_COMPRESSION          0
+#define TINYPAN_ENABLE_COMPRESSION          1
 #endif
 
 #ifndef TINYPAN_FORCE_UNCOMPRESSED_TX
-#define TINYPAN_FORCE_UNCOMPRESSED_TX       1
+#define TINYPAN_FORCE_UNCOMPRESSED_TX       0
 #endif
 
 /**
