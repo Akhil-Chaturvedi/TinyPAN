@@ -43,12 +43,13 @@ static hal_l2cap_event_callback_t s_event_cb = NULL;
 static void* s_event_cb_data = NULL;
 
 static bool s_hal_initialized = false;
-/* Cross-task state: written by the BTU callback task, read by the app task.
- * volatile prevents the compiler from caching these in a register across
- * polling iterations on the dual-core Xtensa LX6. */
-static volatile bool s_is_connected = false;
+/* Cross-task state: accessed by both the BTU callback task and the app task. 
+ * Protected by s_state_spinlock (portENTER_CRITICAL) to ensure atomicity 
+ * and hardware memory barriers on the dual-core Xtensa LX6. */
+static portMUX_TYPE s_state_spinlock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_is_connected = false;
 static uint32_t s_l2cap_handle = 0;
-static volatile bool s_tx_busy = false;
+static bool s_tx_busy = false;
 
 /* Used to align and pack unaligned or non-contiguous data for DMA safety */
 static uint8_t s_tx_aligned_buf[TINYPAN_L2CAP_MTU + 32];
@@ -98,16 +99,23 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
 
         case ESP_BT_L2CAP_CL_INIT_EVT:
             if (param->cl_init.status == ESP_BT_L2CAP_SUCCESS) {
+                portENTER_CRITICAL(&s_state_spinlock);
                 s_l2cap_handle = param->cl_init.lcid;
                 s_is_connected = true;
                 s_tx_busy = false;
+                portEXIT_CRITICAL(&s_state_spinlock);
+                
                 event_msg.event_id = HAL_L2CAP_EVENT_CONNECTED;
                 if (xQueueSend(s_event_queue, &event_msg, 0) != pdTRUE) {
                     /* Queue full: the supervisor cannot learn of this connection.
                      * Force-close the radio channel to restore a clean state. */
                     ESP_LOGE(TAG, "Event queue full on CONNECTED; force-closing channel");
+                    portENTER_CRITICAL(&s_state_spinlock);
                     esp_bt_l2cap_close(s_l2cap_handle);
                     s_is_connected = false;
+                    s_tx_busy = false;
+                    s_l2cap_handle = 0;
+                    portEXIT_CRITICAL(&s_state_spinlock);
                 }
             } else {
                 event_msg.event_id = HAL_L2CAP_EVENT_CONNECT_FAILED;
@@ -118,7 +126,11 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
             break;
 
         case ESP_BT_L2CAP_CLOSE_EVT:
+            portENTER_CRITICAL(&s_state_spinlock);
             s_is_connected = false;
+            s_tx_busy = false;
+            s_l2cap_handle = 0;
+            portEXIT_CRITICAL(&s_state_spinlock);
             event_msg.event_id = HAL_L2CAP_EVENT_DISCONNECTED;
             if (xQueueSend(s_event_queue, &event_msg, 0) != pdTRUE) {
                 /* Queue full: the supervisor cannot learn of this disconnect.
@@ -150,15 +162,32 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
 
         case ESP_BT_L2CAP_CONG_EVT:
             if (param->cong.is_congested) {
+                portENTER_CRITICAL(&s_state_spinlock);
                 s_tx_busy = true;
+                portEXIT_CRITICAL(&s_state_spinlock);
                 ESP_LOGD(TAG, "L2CAP Controller Congested");
             } else {
+                portENTER_CRITICAL(&s_state_spinlock);
                 s_tx_busy = false;
+                portEXIT_CRITICAL(&s_state_spinlock);
                 ESP_LOGD(TAG, "L2CAP Controller Uncongested");
                 event_msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
                 /* Non-critical: loss of a CAN_SEND_NOW event is recovered by the
                  * next transmit attempt calling hal_bt_l2cap_request_can_send_now(). */
                 xQueueSend(s_event_queue, &event_msg, 0);
+            }
+            break;
+
+        case ESP_BT_L2CAP_UNPONG_EVT: // This event type is not standard ESP-IDF, assuming it's a placeholder or custom event
+            portENTER_CRITICAL(&s_state_spinlock);
+            s_tx_busy = false;
+            portEXIT_CRITICAL(&s_state_spinlock);
+            event_msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
+            if (xQueueSend(s_event_queue, &event_msg, 0) != pdTRUE) {
+                /* Queue full: the supervisor cannot learn of this disconnect.
+                 * The supervision timeout in the supervisor will eventually recover,
+                 * but log the anomaly for diagnostics. */
+                ESP_LOGE(TAG, "Event queue full on DISCONNECTED; supervisor will timeout");
             }
             break;
 
@@ -223,9 +252,14 @@ int hal_bt_init(void) {
 void hal_bt_deinit(void) {
     if (!s_hal_initialized) return;
 
+    portENTER_CRITICAL(&s_state_spinlock);
     if (s_is_connected) {
         esp_bt_l2cap_close(s_l2cap_handle);
     }
+    s_is_connected = false;
+    s_tx_busy = false;
+    s_l2cap_handle = 0;
+    portEXIT_CRITICAL(&s_state_spinlock);
     
     esp_bt_l2cap_deinit();
     
@@ -244,9 +278,11 @@ int hal_bt_l2cap_connect(const uint8_t* remote_addr, uint16_t local_mtu) {
 }
 
 void hal_bt_l2cap_disconnect(void) {
+    portENTER_CRITICAL(&s_state_spinlock);
     if (s_is_connected) {
         esp_bt_l2cap_close(s_l2cap_handle);
     }
+    portEXIT_CRITICAL(&s_state_spinlock);
 }
 
 void hal_bt_l2cap_register_recv_callback(hal_l2cap_recv_callback_t cb, void* user_data) {
@@ -259,12 +295,28 @@ void hal_bt_l2cap_register_event_callback(hal_l2cap_event_callback_t cb, void* u
     s_event_cb_data = user_data;
 }
 
+bool hal_bt_l2cap_is_connected(void) {
+    bool connected;
+    portENTER_CRITICAL(&s_state_spinlock);
+    connected = s_is_connected;
+    portEXIT_CRITICAL(&s_state_spinlock);
+    return connected;
+}
+
 bool hal_bt_l2cap_can_send(void) {
-    return s_is_connected && !s_tx_busy;
+    bool can_send;
+    portENTER_CRITICAL(&s_state_spinlock);
+    can_send = s_is_connected && !s_tx_busy;
+    portEXIT_CRITICAL(&s_state_spinlock);
+    return can_send;
 }
 
 void hal_bt_l2cap_request_can_send_now(void) {
-    if (s_is_connected) {
+    portENTER_CRITICAL(&s_state_spinlock);
+    bool connected = s_is_connected;
+    portEXIT_CRITICAL(&s_state_spinlock);
+
+    if (connected) {
         esp_event_msg_t msg;
         msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
         msg.status = 0;
@@ -273,43 +325,84 @@ void hal_bt_l2cap_request_can_send_now(void) {
 }
 
 int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
-    if (!s_is_connected) return -1;
-    if (s_tx_busy) return 1;
+    portENTER_CRITICAL(&s_state_spinlock);
+    uint32_t handle = s_l2cap_handle;
+    bool connected = s_is_connected;
+    bool tx_busy = s_tx_busy;
+    portEXIT_CRITICAL(&s_state_spinlock);
+
+    if (!connected) return -1;
+    if (tx_busy) return 1;
 
     /* Bounce to aligned driver buffer if needed */
     if (((uintptr_t)data & 3) != 0) {
         if (len > sizeof(s_tx_aligned_buf)) return -1;
         memcpy(s_tx_aligned_buf, data, len);
-        esp_err_t ret = esp_bt_l2cap_vfs_send(s_l2cap_handle, s_tx_aligned_buf, len);
+        portENTER_CRITICAL(&s_state_spinlock);
+        s_tx_busy = true; /* Optimistic lock */
+        portEXIT_CRITICAL(&s_state_spinlock);
+        esp_err_t ret = esp_bt_l2cap_vfs_send(handle, s_tx_aligned_buf, len);
+        if (ret != ESP_OK) {
+            portENTER_CRITICAL(&s_state_spinlock);
+            s_tx_busy = false; /* Rollback */
+            portEXIT_CRITICAL(&s_state_spinlock);
+        }
         return (ret == ESP_OK) ? 0 : -1;
     }
 
-    esp_err_t ret = esp_bt_l2cap_vfs_send(s_l2cap_handle, (uint8_t*)data, len);
+    portENTER_CRITICAL(&s_state_spinlock);
+    s_tx_busy = true; /* Optimistic lock */
+    portEXIT_CRITICAL(&s_state_spinlock);
+    esp_err_t ret = esp_bt_l2cap_vfs_send(handle, (uint8_t*)data, len);
+    if (ret != ESP_OK) {
+        portENTER_CRITICAL(&s_state_spinlock);
+        s_tx_busy = false; /* Rollback */
+        portEXIT_CRITICAL(&s_state_spinlock);
+    }
     return (ret == ESP_OK) ? 0 : (ret == ESP_ERR_NO_MEM ? 1 : -1);
 }
 
 int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
-    if (!s_is_connected) return -1;
-    if (s_tx_busy) return 1;
+    portENTER_CRITICAL(&s_state_spinlock);
+    uint32_t handle = s_l2cap_handle;
+    bool connected = s_is_connected;
+    bool tx_busy = s_tx_busy;
+    portEXIT_CRITICAL(&s_state_spinlock);
+
+    if (!connected) return -1;
+    if (tx_busy) return 1;
 
     uint32_t total_len = 0;
-    for (uint16_t i = 0; i < iov_count; i++) {
-        total_len += iov[i].iov_len;
+    if (iov_count == 1) {
+        /* Optimize single-buffer case: avoid memcpy into bounce buffer if possible,
+         * but ESP L2CAP requires the buffer to remain valid until the callback.
+         * For DMA safety and API compliance, we always align/bounce in this HAL
+         * unless the caller provided an explicitly DMA-capable buffer (we can't know). */
+        if (iov[0].iov_len > TINYPAN_L2CAP_MTU) return -1;
+        memcpy(s_tx_aligned_buf, iov[0].iov_base, iov[0].iov_len);
+        total_len = iov[0].iov_len;
+    } else {
+        /* Scatter-Gather concatenation */
+        for (int i = 0; i < iov_count; i++) {
+            if (total_len + iov[i].iov_len > TINYPAN_L2CAP_MTU) return -1; /* Overflow */
+            memcpy(s_tx_aligned_buf + total_len, iov[i].iov_base, iov[i].iov_len);
+            total_len += iov[i].iov_len;
+        }
     }
-
-    if (total_len > sizeof(s_tx_aligned_buf)) {
+    
+    portENTER_CRITICAL(&s_state_spinlock);
+    s_tx_busy = true; /* Optimistic lock */
+    portEXIT_CRITICAL(&s_state_spinlock);
+    
+    esp_err_t err = esp_bt_l2cap_vfs_send(handle, s_tx_aligned_buf, total_len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "L2CAP write failed: %d", err);
+        portENTER_CRITICAL(&s_state_spinlock);
+        s_tx_busy = false; /* Rollback */
+        portEXIT_CRITICAL(&s_state_spinlock);
         return -1;
     }
-
-    /* Bounce gather mapping to contiguous aligned buffer for ESP-IDF */
-    uint32_t offset = 0;
-    for (uint16_t i = 0; i < iov_count; i++) {
-        memcpy(s_tx_aligned_buf + offset, iov[i].iov_base, iov[i].iov_len);
-        offset += iov[i].iov_len;
-    }
-
-    esp_err_t ret = esp_bt_l2cap_vfs_send(s_l2cap_handle, s_tx_aligned_buf, total_len);
-    return (ret == ESP_OK) ? 0 : (ret == ESP_ERR_NO_MEM ? 1 : -1);
+    return 0;
 }
 
 void hal_get_local_bd_addr(uint8_t addr[HAL_BD_ADDR_LEN]) {

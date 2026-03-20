@@ -2,8 +2,8 @@
  * TinyPAN BNEP Transport Backend
  *
  * Implements tinypan_transport_t for Bluetooth Classic BNEP mode.
- * Optimized for zero-copy transmission via in-place Ethernet-to-BNEP header
- * swapping and naturally aligned payload offsets (ETH_PAD_SIZE=1).
+ * Optimized for zero-copy transmission via scatter-gather iovec mapping,
+ * separating the synthesized BNEP header from the original pbuf payload.
  */
 
 #include "tinypan_transport.h"
@@ -99,14 +99,16 @@ static void bnep_transport_on_can_send_now(void) {
 
 #if TINYPAN_ENABLE_LWIP
 
-/* TX Queue: stores modified pbufs with BNEP headers written in-place */
-static struct pbuf* s_bnep_tx_queue[TINYPAN_TX_QUEUE_LEN] = {0};
+/* TX Queue: stores unmodified pbufs alongside their synthesized BNEP headers */
+typedef struct {
+    struct pbuf* p;
+    uint8_t hdr[15];
+    uint8_t hdr_len;
+} bnep_tx_job_t;
+
+static bnep_tx_job_t s_bnep_tx_queue[TINYPAN_TX_QUEUE_LEN];
 static uint8_t s_bnep_tx_head = 0;
 static uint8_t s_bnep_tx_tail = 0;
-
-/* Tracks how many bytes were prepended via pbuf_header for each queued frame,
- * so we can restore the pointer after the send completes. */
-static int16_t s_bnep_tx_hdr_delta[TINYPAN_TX_QUEUE_LEN] = {0};
 
 /* Must be exposed to drain the BNEP tx queue */
 void bnep_transport_drain_tx_queue(void) {
@@ -122,18 +124,39 @@ void bnep_transport_drain_tx_queue(void) {
             break;
         }
         
-        struct pbuf* q = s_bnep_tx_queue[s_bnep_tx_head];
+        bnep_tx_job_t* job = &s_bnep_tx_queue[s_bnep_tx_head];
+        struct pbuf* q = job->p;
         int result = 0;
         
-        /* Convert pbuf chain to iovec array */
+        /* Convert to iovec array: 
+         * iov[0] = Synthesized BNEP header
+         * iov[1..N] = Original pbuf, skipping the 14-byte Ethernet header */
         tinypan_iovec_t iov[16];
         uint16_t iov_count = 0;
+        
+        iov[0].iov_base = job->hdr;
+        iov[0].iov_len = job->hdr_len;
+        iov_count = 1;
+
+        /* Determine offset to skip the Ethernet header (14 bytes + pad) */
+#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
+        uint16_t skip_bytes = 14 + ETH_PAD_SIZE;
+#else
+        uint16_t skip_bytes = 14;
+#endif
+
         struct pbuf* iter = q;
         while (iter != NULL && iov_count < 16) {
             if (iter->len > 0) {
-                iov[iov_count].iov_base = (const uint8_t*)iter->payload;
-                iov[iov_count].iov_len = iter->len;
-                iov_count++;
+                if (skip_bytes >= iter->len) {
+                    /* Entire pbuf is skipped */
+                    skip_bytes -= iter->len;
+                } else {
+                    iov[iov_count].iov_base = (const uint8_t*)iter->payload + skip_bytes;
+                    iov[iov_count].iov_len = iter->len - skip_bytes;
+                    iov_count++;
+                    skip_bytes = 0; /* Only skip in the first block(s) */
+                }
             }
             iter = iter->next;
         }
@@ -146,24 +169,17 @@ void bnep_transport_drain_tx_queue(void) {
         }
         
         if (result == 0) {
-            /* Restore the pbuf payload pointer before releasing */
-            int16_t delta = s_bnep_tx_hdr_delta[s_bnep_tx_head];
-            if (delta > 0) {
-                pbuf_header(q, -delta);
-            }
-            s_bnep_tx_queue[s_bnep_tx_head] = NULL;
+            /* Success */
+            job->p = NULL;
             s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
             pbuf_free(q);
         } else if (result > 0) {
             hal_bt_l2cap_request_can_send_now();
             break;
         } else {
+            /* Drop packet on hard failure */
             TINYPAN_LOG_ERROR("transport_bnep: Queue flush failed: %d", result);
-            int16_t delta = s_bnep_tx_hdr_delta[s_bnep_tx_head];
-            if (delta > 0) {
-                pbuf_header(q, -delta);
-            }
-            s_bnep_tx_queue[s_bnep_tx_head] = NULL;
+            job->p = NULL;
             s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
             pbuf_free(q);
         }
@@ -172,13 +188,9 @@ void bnep_transport_drain_tx_queue(void) {
 
 void bnep_transport_flush_tx_queue(void) {
     while (s_bnep_tx_head != s_bnep_tx_tail) {
-        if (s_bnep_tx_queue[s_bnep_tx_head] != NULL) {
-            int16_t delta = s_bnep_tx_hdr_delta[s_bnep_tx_head];
-            if (delta > 0) {
-                pbuf_header(s_bnep_tx_queue[s_bnep_tx_head], -delta);
-            }
-            pbuf_free(s_bnep_tx_queue[s_bnep_tx_head]);
-            s_bnep_tx_queue[s_bnep_tx_head] = NULL;
+        if (s_bnep_tx_queue[s_bnep_tx_head].p != NULL) {
+            pbuf_free(s_bnep_tx_queue[s_bnep_tx_head].p);
+            s_bnep_tx_queue[s_bnep_tx_head].p = NULL;
         }
         s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
     }
@@ -192,11 +204,10 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
         return ERR_CONN;
     }
     
-    /* True Zero-Copy BNEP TX Path.
-     * lwIP pre-allocates PBUF_LINK_ENCAPSULATION_HLEN (15) bytes of headroom
-     * in every outgoing pbuf. We use pbuf_header() to expand backwards into
-     * that reserved space, write the BNEP header in-place, send, and then
-     * restore the pointer so lwIP can safely retry/free the pbuf. */
+    /* True Zero-Copy BNEP TX Path via `iovec`.
+     * Instead of mutating the shared pbuf using pbuf_header(), we synthesize
+     * the BNEP header locally in the queue struct, and pass it directly into
+     * iov[0] while the remaining pbuf segments map to iov[1..N]. */
 
     uint8_t dst_addr[6], src_addr[6];
     uint16_t ethertype;
@@ -216,38 +227,19 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
 
     uint8_t bnep_hdr_len = bnep_get_ethernet_header_len(dst_addr, src_addr);
 
-    /* Strip the 14-byte Ethernet header + pad, then expand into headroom
-     * for the BNEP header. Net delta = bnep_hdr_len - (14 + eth_offset). */
-    int16_t strip = (int16_t)(14 + eth_offset);
-    if (pbuf_header(p, -strip) != 0) {
-        TINYPAN_LOG_ERROR("transport_bnep: Failed to strip Ethernet header");
-        return ERR_BUF;
-    }
-    
-    /* Expand backwards into the pre-allocated PBUF_LINK_ENCAPSULATION_HLEN space */
-    if (pbuf_header(p, (int16_t)bnep_hdr_len) != 0) {
-        /* Restore original position on failure */
-        pbuf_header(p, strip);
-        TINYPAN_LOG_ERROR("transport_bnep: No headroom for BNEP header");
-        return ERR_BUF;
-    }
-
-    /* Write the BNEP header directly into the pbuf's headroom */
-    bnep_write_ethernet_header((uint8_t*)p->payload, bnep_hdr_len, dst_addr, src_addr, ethertype);
-    
-    /* Track total header delta so we can restore the pointer after send */
-    int16_t hdr_delta = (int16_t)bnep_hdr_len - strip;
-    
-    /* Enqueue the modified pbuf */
+    /* Enqueue the job */
     uint8_t next_tail = (s_bnep_tx_tail + 1) % TINYPAN_TX_QUEUE_LEN;
     if (next_tail == s_bnep_tx_head) {
-        /* Queue full, restore pbuf and report backpressure */
-        pbuf_header(p, -hdr_delta);
+        /* Queue full, report backpressure */
         return ERR_MEM;
     }
+    
+    bnep_tx_job_t* job = &s_bnep_tx_queue[s_bnep_tx_tail];
     pbuf_ref(p);
-    s_bnep_tx_queue[s_bnep_tx_tail] = p;
-    s_bnep_tx_hdr_delta[s_bnep_tx_tail] = hdr_delta;
+    job->p = p;
+    job->hdr_len = bnep_hdr_len;
+    bnep_write_ethernet_header(job->hdr, bnep_hdr_len, dst_addr, src_addr, ethertype);
+    
     s_bnep_tx_tail = next_tail;
 
     /* Signal the HAL. The application polling thread will drain the queue

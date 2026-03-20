@@ -21,13 +21,13 @@ Targeted at BLE-only controllers (e.g., nRF52, ESP32-C3).
 ## Memory Design
 
 ### BNEP Transmission
-The BNEP transport (`tinypan_bnep_transport.c`) uses `pbuf_header()` to write the BNEP header in-place into the headroom reserved by lwIP (`PBUF_LINK_ENCAPSULATION_HLEN = 15` bytes). For standard PANU-to-NAP connections, TinyPAN dynamically selects **BNEP Compressed Ethernet** (Type 0x02), saving 12 bytes of overhead per IP packet. General Ethernet (Type 0x00) is used as a fallback for non-standard topologies.
+The BNEP transport (`tinypan_bnep_transport.c`) implements true zero-copy via scatter-gather DMA. Outgoing `pbuf` chains are mapped to a `tinypan_iovec_t` array where the first element is a locally synthesized BNEP header (supporting both Type 0x00 General and Type 0x02 Compressed formats). The subsequent `iovec` entries point directly to the original `pbuf->payload` segments, bypassing the Ethernet header. This architecture prevents mutation of shared lwIP memory, making the library safe for TCP-enabled builds.
 
 ### SLIP Encoder
-The SLIP transport encodes outgoing `pbuf` chains on the fly using a `memchr`-based scan into a 128-byte staging buffer. Contiguous runs of non-escape bytes are copied in bulk; only bytes requiring escaping (`0xC0`, `0xDB`) are handled individually. The original pbuf is held by reference (`pbuf_ref`) and freed after transmission, avoiding any intermediate heap allocation.
+The SLIP transport encodes outgoing `pbuf` chains on the fly into a 255-byte staging buffer—a size optimized for modern BLE 4.2+ Data Length Extension (DLE) MTUs. Contiguous runs of non-escape bytes are copied in bulk; only bytes requiring escaping (`0xC0`, `0xDB`) are handled individually. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is acknowledged by the HAL.
 
 ### SLIP Decoder
-Incoming SLIP bytes are accumulated directly into pool-allocated (`PBUF_POOL`) segments via a streaming FSM. A single incoming frame is limited to 2 pool segments (~3 KB). If a frame exceeds this limit, the buffer is freed and the FSM enters a "seek-to-end" state, discarding subsequent bytes until the next `SLIP_END` delimiter is found; this prevents a malformed frame from corrupting the next valid frame in the same stream.
+Incoming SLIP bytes are accumulated directly into pool-allocated (`PBUF_POOL`) segments via a streaming FSM. A single incoming frame is bounded to 2 pool segments (~3 KB). If a frame exceeds this limit, the FSM enters a `seeking_end` state and pauses pool allocations until a `SLIP_END` delimiter is reached, preventing memory-pool thrashing during error recovery. When a valid frame is completed, the last segment is trimmed with `pbuf_realloc` to the exact data length.
 
 ### Resource Metrics (Typical 32-bit MCU)
 - **Library BSS/Data:** < 400 bytes (core and transport state, excluding lwIP pool)

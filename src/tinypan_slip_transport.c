@@ -79,86 +79,25 @@ static uint16_t s_slip_rx_curr_offset = 0;
 static uint16_t s_slip_rx_total_offset = 0;
 static uint8_t s_slip_rx_seg_count = 0;
 static bool s_slip_rx_escape = false;
+static bool s_slip_rx_seeking_end = false;
 
-/* TX State Machine */
+/* SLIP Interface variables */
 static struct pbuf* s_slip_tx_queue[TINYPAN_TX_QUEUE_LEN] = {0};
 static uint8_t s_slip_tx_head = 0;
 static uint8_t s_slip_tx_tail = 0;
+
+/* Fits a standard 247-byte BLE 4.2+ Data Length Extension MTU without
+ * artificially fragmenting it and causing extra RTOS context switches */
+static uint8_t s_slip_chunk_buf[255];
+static uint16_t s_slip_chunk_len = 0;
 static struct pbuf* s_slip_tx_current = NULL; /* Tracks current segment in the chain */
 static uint16_t s_slip_tx_offset = 0;
 static uint8_t s_slip_tx_state = 0; /* 0 = START, 1 = PAYLOAD, 2 = END */
-
-static uint8_t s_slip_chunk_buf[128];
-static uint16_t s_slip_chunk_len = 0;
 
 #endif /* TINYPAN_ENABLE_LWIP */
 
 static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
 #if TINYPAN_ENABLE_LWIP
-    if (len == 0 || data == NULL) return;
-
-    const uint8_t* p = data;
-    const uint8_t* end = data + len;
-
-    while (p < end) {
-        if (s_slip_rx_pbuf == NULL) {
-            /* Memory Management: Allocate a full pool segment. lwIP sets len/tot_len
-             * to 0 if we pass 0 to pbuf_alloc, which would cause an infinite loop. */
-            s_slip_rx_pbuf = pbuf_alloc(PBUF_RAW, PBUF_POOL_BUFSIZE, PBUF_POOL); 
-            if (s_slip_rx_pbuf == NULL) return; /* OOM */
-            s_slip_rx_curr_pbuf = s_slip_rx_pbuf;
-            s_slip_rx_curr_offset = 0;
-            s_slip_rx_total_offset = 0;
-            s_slip_rx_seg_count = 1;
-            s_slip_rx_escape = false;
-        }
-
-        /* Fast path: search for next delimiter in the current block */
-        const uint8_t* next_delim = NULL;
-        if (!s_slip_rx_escape) {
-            const uint8_t* next_end = memchr(p, SLIP_END, end - p);
-            const uint8_t* next_esc = memchr(p, SLIP_ESC, end - p);
-            
-            if (next_end && next_esc) next_delim = (next_end < next_esc) ? next_end : next_esc;
-            else next_delim = next_end ? next_end : next_esc;
-        }
-
-        uint16_t chunk_len;
-        if (next_delim) {
-            chunk_len = (uint16_t)(next_delim - p);
-        } else {
-            chunk_len = (uint16_t)(end - p);
-        }
-
-        /* Copy non-escaped chunk directly into pbuf chain */
-        if (chunk_len > 0) {
-            uint16_t written = 0;
-            while (written < chunk_len && s_slip_rx_total_offset < TINYPAN_MAX_FRAME_SIZE) {
-                uint16_t space = s_slip_rx_curr_pbuf->len - s_slip_rx_curr_offset;
-                if (space == 0) {
-                    /* Current segment is full, allocate next one if not and if we are within limits */
-                    /* DoS Guard: Limit pool exhaustion. We already cap total length at 1500,
-                     * but if the pool segment size is small, a frame could eat too many segments.
-                     * For standard 1536-byte segments, 2 segments is the upper bound for one frame. */
-                    if (s_slip_rx_seg_count >= 2) {
-                        TINYPAN_LOG_ERROR("slip_rx: Frame exceeded segment limit, dropping");
-                        pbuf_free(s_slip_rx_pbuf);
-                        s_slip_rx_pbuf = NULL;
-                        s_slip_rx_curr_pbuf = NULL;
-                        s_slip_rx_curr_offset = 0;
-                        s_slip_rx_total_offset = 0;
-                        s_slip_rx_seg_count = 0;
-                        s_slip_rx_escape = false;
-                        /* Re-sync the FSM: skip remaining bytes of this oversized 
-                         * frame until the next SLIP_END delimiter. Any valid 
-                         * frame that follows in this same notification buffer 
-                         * will then be processed correctly. */
-                        while (p < end && *p != SLIP_END) p++;
-                        continue;
-                    }
-
-                    struct pbuf* next = pbuf_alloc(PBUF_RAW, PBUF_POOL_BUFSIZE, PBUF_POOL);
-                    if (next == NULL) { /* OOM */
                         pbuf_free(s_slip_rx_pbuf);
                         s_slip_rx_pbuf = NULL;
                         return;
@@ -189,9 +128,9 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                 s_slip_rx_total_offset = 0;
                 s_slip_rx_seg_count = 0;
                 s_slip_rx_escape = false;
+                s_slip_rx_seeking_end = true;
                 p += (chunk_len - written); /* advance past unwritten bytes */
-                while (p < end && *p != SLIP_END) p++;
-                continue; /* Back to outer while(p < end) */
+                continue; /* outer while will handle the seek */
             }
         }
 
