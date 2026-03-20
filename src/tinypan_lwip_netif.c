@@ -249,6 +249,15 @@ int tinypan_netif_start_dhcp(void) {
     
     TINYPAN_LOG_INFO("netif: Starting DHCP...");
     
+    /* QA-19: DHCP requires Ethernet broadcast and a MAC addr. 
+     * SLIP is Raw IP/P2P; prohibit DHCP to avoid silent failures. */
+    const tinypan_transport_t* transport = tinypan_transport_get();
+    if (transport == &transport_slip) {
+        TINYPAN_LOG_ERROR("netif: DHCP is not supported in SLIP mode (Raw IP/P2P)");
+        TINYPAN_LOG_ERROR("  Integrators must use static IP assignment via tinypan_init()");
+        return -1;
+    }
+
     dhcp_stop(&s_netif);
     err_t err = dhcp_start(&s_netif);
     if (err != ERR_OK) {

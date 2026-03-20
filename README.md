@@ -7,13 +7,14 @@ TinyPAN is a C implementation of the Bluetooth Personal Area Network (PAN) clien
 TinyPAN supports two primary modes of operation, configured via `TINYPAN_USE_BLE_SLIP` in `tinypan_config.h`:
 
 ### Mode A: Bluetooth Classic (BNEP)
-Targeted at dual-mode or Bluetooth Classic controllers (e.g., ESP32).
+Targeted at dual-mode Bluetooth controllers (e.g., ESP32, ESP32-S3).
 
 - **Stack:** lwIP -> BNEP -> L2CAP (Classic)
 - **Compatibility:** Connects to the standard iOS/Android Personal Hotspot. No custom host-side software is required.
+- **Note:** ESP32-C3 and other BLE-only SoCs are NOT supported in this mode.
 
 ### Mode B: BLE SLIP Bridge
-Targeted at BLE-only controllers (e.g., nRF52, ESP32-C3).
+Targeted at BLE-only or dual-mode controllers (e.g., nRF52, ESP32-C3).
 
 - **Stack:** lwIP -> SLIP -> BLE UART Service (NUS)
 - **Compatibility:** Requires a companion application on the host to bridge BLE traffic into the OS networking stack. This is not a standard hotspot connection.

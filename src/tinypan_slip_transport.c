@@ -136,13 +136,44 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
 
         /* Fast path: search for next delimiter in the current block */
         const uint8_t* next_delim = NULL;
-        if (!s_slip_rx_escape) {
-            const uint8_t* next_end = (const uint8_t*)memchr(p, SLIP_END, end - p);
-            const uint8_t* next_esc = (const uint8_t*)memchr(p, SLIP_ESC, end - p);
+        
+        /* QA-19: Handle pending escape byte *before* chunking search.
+         * If we started this buffer in an escape state, we must consume 
+         * exactly one byte to finish the escaped sequence before we can 
+         * safely use memchr for bulk-copy optimization. */
+        if (s_slip_rx_escape) {
+            uint8_t c = *p++;
+            s_slip_rx_escape = false;
+            if (c == SLIP_ESC_END) c = SLIP_END;
+            else if (c == SLIP_ESC_ESC) c = SLIP_ESC;
+            else {
+                /* Protocol violation: drop frame and seek next END */
+                TINYPAN_LOG_ERROR("slip_rx: Invalid escape sequence");
+                pbuf_free(s_slip_rx_pbuf);
+                s_slip_rx_pbuf = NULL;
+                s_slip_rx_seeking_end = true;
+                continue;
+            }
             
-            if (next_end && next_esc) next_delim = (next_end < next_esc) ? next_end : next_esc;
-            else next_delim = next_end ? next_end : next_esc;
+            /* Write the translated byte to pbuf */
+            if (s_slip_rx_total_offset < TINYPAN_MAX_FRAME_SIZE) {
+                while (s_slip_rx_curr_pbuf != NULL && s_slip_rx_curr_offset >= s_slip_rx_curr_pbuf->len) {
+                    s_slip_rx_curr_pbuf = s_slip_rx_curr_pbuf->next;
+                    s_slip_rx_curr_offset = 0;
+                }
+                if (s_slip_rx_curr_pbuf) {
+                    ((uint8_t*)s_slip_rx_curr_pbuf->payload)[s_slip_rx_curr_offset++] = c;
+                    s_slip_rx_total_offset++;
+                }
+            }
+            continue; /* Re-evaluate search from new p */
         }
+
+        const uint8_t* next_end = (const uint8_t*)memchr(p, SLIP_END, end - p);
+        const uint8_t* next_esc = (const uint8_t*)memchr(p, SLIP_ESC, end - p);
+        
+        if (next_end && next_esc) next_delim = (next_end < next_esc) ? next_end : next_esc;
+        else next_delim = next_end ? next_end : next_esc;
 
         uint16_t chunk_len;
         if (next_delim) {
@@ -215,35 +246,7 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
         /* Process the delimiter or escape byte */
         if (p < end) {
             uint8_t c = *p++;
-            if (s_slip_rx_escape) {
-                s_slip_rx_escape = false;
-                if (c == SLIP_ESC_END) c = SLIP_END;
-                else if (c == SLIP_ESC_ESC) c = SLIP_ESC;
-                else continue; /* Protocol violation */
-                
-                /* Write the escaped byte */
-                if (s_slip_rx_total_offset < TINYPAN_MAX_FRAME_SIZE) {
-                    while (s_slip_rx_curr_pbuf != NULL && s_slip_rx_curr_offset >= s_slip_rx_curr_pbuf->len) {
-                        s_slip_rx_curr_pbuf = s_slip_rx_curr_pbuf->next;
-                        s_slip_rx_curr_offset = 0;
-                    }
-                    if (s_slip_rx_curr_pbuf) {
-                        ((uint8_t*)s_slip_rx_curr_pbuf->payload)[s_slip_rx_curr_offset++] = c;
-                        s_slip_rx_total_offset++;
-                    }
-                } else {
-                    /* DoS/Corruption Guard: Drop over-sized frame explicitly */
-                    TINYPAN_LOG_ERROR("slip_rx: Escaped byte exceeded limit, dropping");
-                    pbuf_free(s_slip_rx_pbuf);
-                    s_slip_rx_pbuf = NULL;
-                    s_slip_rx_curr_pbuf = NULL;
-                    s_slip_rx_curr_offset = 0;
-                    s_slip_rx_total_offset = 0;
-                    s_slip_rx_seg_count = 0;
-                    s_slip_rx_escape = false; /* QA-17: Fix state poisoning */
-                    s_slip_rx_seeking_end = true;
-                }
-            } else if (c == SLIP_ESC) {
+            if (c == SLIP_ESC) {
                 s_slip_rx_escape = true;
             } else if (c == SLIP_END) {
                 if (s_slip_rx_total_offset > 0) {
