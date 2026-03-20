@@ -161,7 +161,12 @@ void bnep_transport_drain_tx_queue(void) {
             iter = iter->next;
         }
         
-        if (iter != NULL) {
+        if (iov_count <= 1) {
+            /* Empty frame (Ethernet header entirely skipped, no payload).
+             * Drop cleanly as there is nothing to send besides the BNEP header. */
+            TINYPAN_LOG_WARN("transport_bnep: Dropping empty payload frame");
+            result = 0;
+        } else if (iter != NULL) {
             TINYPAN_LOG_ERROR("transport_bnep: PBUF chain too long for iovec");
             result = -1;
         } else {

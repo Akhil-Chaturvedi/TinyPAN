@@ -146,7 +146,7 @@ typedef struct {
  *
  * @param iov          Array of I/O vectors
  * @param iov_count    Number of vectors in the array
- * @return 0 on success, negative error code on failure, positive if busy
+ * @return 0 on success, negative error code on failure, 1 if radio is busy/congested
  */
 int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count);
 

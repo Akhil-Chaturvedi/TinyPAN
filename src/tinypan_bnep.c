@@ -538,10 +538,11 @@ int bnep_send_setup_response(uint16_t response_code) {
                 memcpy(s_control_queue[s_control_tail].buf, tx_buffer, pkt_len);
                 s_control_queue[s_control_tail].len = (uint8_t)pkt_len;
                 s_control_tail = next_tail;
+                hal_bt_l2cap_request_can_send_now();
+                return 0; /* Successfully queued for later transmission */
             }
         }
-        hal_bt_l2cap_request_can_send_now();
-        return TINYPAN_ERR_BUSY;
+        return -1; /* Queue full or packet too large */
     } else if (result < 0) {
         TINYPAN_LOG_ERROR("Failed to send setup response: %d", result);
         return result;

@@ -21,7 +21,7 @@ Targeted at BLE-only controllers (e.g., nRF52, ESP32-C3).
 ## Memory Design
 
 ### BNEP Transmission
-The BNEP transport (`tinypan_bnep_transport.c`) implements true zero-copy via scatter-gather DMA. Outgoing `pbuf` chains are mapped to a `tinypan_iovec_t` array where the first element is a locally synthesized BNEP header (supporting both Type 0x00 General and Type 0x02 Compressed formats). The subsequent `iovec` entries point directly to the original `pbuf->payload` segments, bypassing the Ethernet header. This architecture prevents mutation of shared lwIP memory, making the library safe for TCP-enabled builds.
+The BNEP transport (`tinypan_bnep_transport.c`) implements zero-copy for IP payloads via scatter-gather DMA mapping. Outgoing `pbuf` chains are mapped to a `tinypan_iovec_t` array where `iov[0]` is a locally synthesized BNEP header (supporting Type 0x00 and Type 0x02 formats). Subsequent `iovec` entries point directly to the original `pbuf->payload` segments, skipping the Ethernet header. This prevents mutation of shared lwIP memory, ensuring safety for concurrent TCP retransmissions.
 
 ### SLIP Encoder
 The SLIP transport encodes outgoing `pbuf` chains on the fly into a 255-byte staging buffer—a size optimized for modern BLE 4.2+ Data Length Extension (DLE) MTUs. Contiguous runs of non-escape bytes are copied in bulk; only bytes requiring escaping (`0xC0`, `0xDB`) are handled individually. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is acknowledged by the HAL.
@@ -30,11 +30,11 @@ The SLIP transport encodes outgoing `pbuf` chains on the fly into a 255-byte sta
 Incoming SLIP bytes are accumulated directly into pool-allocated (`PBUF_POOL`) segments via a streaming FSM. A single incoming frame is bounded to 2 pool segments (~3 KB). If a frame exceeds this limit, the FSM enters a `seeking_end` state and pauses pool allocations until a `SLIP_END` delimiter is reached, preventing memory-pool thrashing during error recovery. When a valid frame is completed, the last segment is trimmed with `pbuf_realloc` to the exact data length.
 
 ### Resource Metrics (Typical 32-bit MCU)
-- **Library BSS/Data:** < 400 bytes (core and transport state, excluding lwIP pool)
+- **Library BSS/Data:** < 400 bytes (core logic and transport state)
 - **Flash (Text):** ~12-18 KB, mode dependent
 - **lwIP Heap/Pool:** Configurable; defaults to 4 byte-aligned segments (6.8KB pool) plus 4KB heap.
-- **ESP32 HAL BSS:** ~7.0 KB static RAM (4 x 1.7KB RX slots plus TX bounce buffer). Configurable via `TINYPAN_ESP_RX_RING_SLOTS`.
-- **Zephyr HAL BSS:** ~2.5 KB static RAM (1.9KB RX ring buffer plus events).
+- **ESP32 HAL RAM:** ~8.6 KB static RAM (6.8KB RX ring buffer + 1.7KB TX bounce buffer). Configurable via `TINYPAN_ESP_RX_RING_SLOTS`.
+- **Zephyr HAL RAM:** ~3.6 KB static RAM (1.9KB RX ring buffer + 1.7KB TX staging buffer).
 
 ## Hardware Abstraction Layer (HAL)
 

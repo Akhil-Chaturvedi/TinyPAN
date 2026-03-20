@@ -282,7 +282,7 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
     if (len > sizeof(s_tx_buf)) return -1;
 
     if (s_tx_len > 0) {
-        return TINYPAN_ERR_BUSY;
+        return 1;
     }
 
     /* Accept the frame and begin asynchronous chunking task in poll() loop */
@@ -298,7 +298,7 @@ int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
     if (!s_current_conn) return -1;
 
     if (s_tx_len > 0) {
-        return TINYPAN_ERR_BUSY;
+        return 1;
     }
 
     uint32_t total_len = 0;
