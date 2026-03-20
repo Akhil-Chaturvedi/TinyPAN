@@ -61,6 +61,7 @@ RING_BUF_DECLARE(s_rx_ringbuf, TINYPAN_L2CAP_MTU + 256);
 /* SLIP TX Chunker */
 /* TinyPAN passes ~1500 byte SLIP MTU frames. NUS must chunk them to BLE MTU */
 static bool s_tx_notify_pending = false;
+static uint32_t s_tx_retry_time = 0;
 
 /* ============================================================================
  * Internal Zephyr Task (The Bridge)
@@ -94,11 +95,13 @@ void hal_bt_poll(void) {
 
     /* 3. Drain pending CAN_SEND_NOW events */
     if (s_current_conn && s_tx_notify_pending) {
-        s_tx_notify_pending = false;
-        struct z_event_msg msg;
-        msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
-        msg.status = 0;
-        k_msgq_put(&s_zephyr_event_q, &msg, K_NO_WAIT);
+        if (k_uptime_get() >= s_tx_retry_time) {
+            s_tx_notify_pending = false;
+            struct z_event_msg msg;
+            msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
+            msg.status = 0;
+            k_msgq_put(&s_zephyr_event_q, &msg, K_NO_WAIT);
+        }
     }
 }
 
@@ -235,6 +238,7 @@ bool hal_bt_l2cap_can_send(void) {
 void hal_bt_l2cap_request_can_send_now(void) {
     if (s_current_conn) {
         s_tx_notify_pending = true;
+        s_tx_retry_time = k_uptime_get() + 5; /* 5ms backoff */
     }
 }
 

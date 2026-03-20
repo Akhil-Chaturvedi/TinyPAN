@@ -177,8 +177,14 @@ bool hal_bt_l2cap_can_send(void);
 /**
  * @brief Request a "can send now" event
  * 
- * If hal_bt_l2cap_can_send() returns false, call this function and wait for
- * the HAL_L2CAP_EVENT_CAN_SEND_NOW event before trying to send again.
+ * If a send API returns 1 (Busy), the transport calls this function and waits
+ * for the HAL_L2CAP_EVENT_CAN_SEND_NOW event before trying to send again.
+ *
+ * **CRITICAL WARNING:** To prevent 100% CPU deadlocks, the HAL MUST NOT
+ * immediately fire the CAN_SEND_NOW event if the hardware is genuinely congested.
+ * The HAL should only fire the event when a native hardware un-congestion interrupt
+ * fires. If no native interrupt exists, the HAL must implement a polling delay 
+ * (e.g., waiting 5-10ms) before firing the event to allow the radio time to drain.
  */
 void hal_bt_l2cap_request_can_send_now(void);
 

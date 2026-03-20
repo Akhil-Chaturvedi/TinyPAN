@@ -328,21 +328,28 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
     if (((uintptr_t)data & 3) != 0) {
         if (len > sizeof(s_tx_aligned_buf)) return -1;
         memcpy(s_tx_aligned_buf, data, len);
-        
         esp_err_t ret = esp_bt_l2cap_data_write(handle, s_tx_aligned_buf, len);
         /* Contract: Do NOT fire TX_COMPLETE for contiguous send() */
-        if (ret == ESP_OK) {
-            return 0;
+        if (ret == ESP_OK) return 0;
+        if (ret == ESP_ERR_NO_MEM) {
+            portENTER_CRITICAL(&s_state_spinlock);
+            s_tx_busy = true;
+            portEXIT_CRITICAL(&s_state_spinlock);
+            return 1;
         }
-        return (ret == ESP_ERR_NO_MEM) ? 1 : -1;
+        return -1;
     }
 
     esp_err_t ret = esp_bt_l2cap_data_write(handle, (uint8_t*)data, len);
     /* Contract: Do NOT fire TX_COMPLETE for contiguous send() */
-    if (ret == ESP_OK) {
-        return 0;
+    if (ret == ESP_OK) return 0;
+    if (ret == ESP_ERR_NO_MEM) {
+        portENTER_CRITICAL(&s_state_spinlock);
+        s_tx_busy = true;
+        portEXIT_CRITICAL(&s_state_spinlock);
+        return 1;
     }
-    return (ret == ESP_ERR_NO_MEM) ? 1 : -1;
+    return -1;
 }
 
 int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
@@ -372,11 +379,16 @@ int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
             total_len += iov[i].iov_len;
         }
     }
-    
     esp_err_t err = esp_bt_l2cap_data_write(handle, s_tx_aligned_buf, total_len);
     if (err != ESP_OK) {
+        if (err == ESP_ERR_NO_MEM) {
+            portENTER_CRITICAL(&s_state_spinlock);
+            s_tx_busy = true;
+            portEXIT_CRITICAL(&s_state_spinlock);
+            return 1;
+        }
         ESP_LOGE(TAG, "L2CAP write failed: %d", err);
-        return (err == ESP_ERR_NO_MEM) ? 1 : -1;
+        return -1;
     }
     
     esp_event_msg_t tx_msg = { .event_id = HAL_L2CAP_EVENT_TX_COMPLETE, .status = 0 };
