@@ -222,7 +222,33 @@
 #define TINYPAN_NTOHS(x)    lwip_ntohs(x)
 #define TINYPAN_HTONL(x)    lwip_htonl(x)
 #define TINYPAN_NTOHL(x)    lwip_ntohl(x)
-#else
+#else /* !TINYPAN_ENABLE_LWIP */
+
+/*
+ * Portable byte-swap fallbacks for builds that do not link lwIP.
+ * On little-endian targets (ARM Cortex-M, Xtensa/ESP32), bytes must be
+ * swapped to produce network byte order.  On big-endian targets the host
+ * byte order already matches network byte order, so these are no-ops.
+ * The guard uses the GCC/Clang predefined macro __BYTE_ORDER__ which is
+ * available on all supported MCU toolchains.
+ */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && \
+    (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+
+#ifndef TINYPAN_HTONS
+#define TINYPAN_HTONS(x)    ((uint16_t)(x))
+#endif
+#ifndef TINYPAN_NTOHS
+#define TINYPAN_NTOHS(x)    ((uint16_t)(x))
+#endif
+#ifndef TINYPAN_HTONL
+#define TINYPAN_HTONL(x)    ((uint32_t)(x))
+#endif
+#ifndef TINYPAN_NTOHL
+#define TINYPAN_NTOHL(x)    ((uint32_t)(x))
+#endif
+
+#else /* little-endian (default) */
 
 #ifndef TINYPAN_HTONS
 static inline uint16_t tinypan_htons(uint16_t x) {
@@ -237,8 +263,8 @@ static inline uint16_t tinypan_htons(uint16_t x) {
 
 #ifndef TINYPAN_HTONL
 static inline uint32_t tinypan_htonl(uint32_t x) {
-    return ((((x) & 0x000000FFUL) << 24) | (((x) & 0x0000FF00UL) << 8) | \
-            (((x) & 0x00FF0000UL) >> 8) | (((x) & 0xFF000000UL) >> 24));
+    return ((((x) & 0x000000FFUL) << 24) | (((x) & 0x0000FF00UL) << 8) |
+            (((x) & 0x00FF0000UL) >>  8) | (((x) & 0xFF000000UL) >> 24));
 }
 #define TINYPAN_HTONL(x)    tinypan_htonl(x)
 #endif
@@ -247,6 +273,8 @@ static inline uint32_t tinypan_htonl(uint32_t x) {
 #define TINYPAN_NTOHL(x)    TINYPAN_HTONL(x)
 #endif
 
-#endif
+#endif /* endianness check */
+
+#endif /* !TINYPAN_ENABLE_LWIP */
 
 #endif /* TINYPAN_CONFIG_H */

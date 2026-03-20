@@ -83,11 +83,16 @@ void hal_bt_poll(void) {
         }
     }
 
-    /* 2. Drain incoming BLE UART byte stream */
+    /* 2. Drain incoming BLE UART byte stream completely.
+     * ring_buf_get returns up to sizeof(temp_buf) bytes per call. Loop until
+     * the ring buffer is empty so a burst larger than 256 bytes is not held
+     * over to the next poll cycle. */
     uint8_t temp_buf[256];
-    uint32_t read_len = ring_buf_get(&s_rx_ringbuf, temp_buf, sizeof(temp_buf));
-    if (read_len > 0 && s_recv_cb) {
-        s_recv_cb(temp_buf, read_len, s_recv_cb_data);
+    uint32_t read_len;
+    while ((read_len = ring_buf_get(&s_rx_ringbuf, temp_buf, sizeof(temp_buf))) > 0) {
+        if (s_recv_cb) {
+            s_recv_cb(temp_buf, read_len, s_recv_cb_data);
+        }
     }
 
     /* 3. Drain pending SLIP TX chunks */

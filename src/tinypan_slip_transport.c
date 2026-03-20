@@ -37,7 +37,21 @@ static void slip_transport_on_connected(void) {
 }
 
 static void slip_transport_on_disconnected(void) {
-    /* Nothing to do */
+#if TINYPAN_ENABLE_LWIP
+    /* Free any partially-assembled inbound frame. If a connection drops mid-frame
+     * (e.g., BLE signal loss after one or two bytes have been received), the
+     * allocated pbuf pool segment would be leaked otherwise. With PBUF_POOL_SIZE=4
+     * this could exhaust the pool after 4 such events. */
+    if (s_slip_rx_pbuf != NULL) {
+        pbuf_free(s_slip_rx_pbuf);
+        s_slip_rx_pbuf = NULL;
+    }
+    s_slip_rx_curr_pbuf   = NULL;
+    s_slip_rx_curr_offset  = 0;
+    s_slip_rx_total_offset = 0;
+    s_slip_rx_seg_count    = 0;
+    s_slip_rx_escape       = false;
+#endif
 }
 
 static void slip_transport_retry_setup(void) {
