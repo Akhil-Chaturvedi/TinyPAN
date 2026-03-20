@@ -100,10 +100,10 @@ void hal_bt_poll(void) {
     if (s_current_conn && s_tx_notify_pending) {
         if (k_uptime_get() >= s_tx_retry_time) {
             s_tx_notify_pending = false;
-            struct z_event_msg msg;
-            msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
-            msg.status = 0;
-            k_msgq_put(&s_zephyr_event_q, &msg, K_NO_WAIT);
+            /* QA-18: Fire directly to avoid polling-lag jitter */
+            if (s_event_cb) {
+                s_event_cb(HAL_L2CAP_EVENT_CAN_SEND_NOW, 0, s_event_cb_data);
+            }
         }
     }
 }

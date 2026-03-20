@@ -314,6 +314,9 @@ void slip_transport_drain_tx_queue(void) {
     uint16_t hal_mtu = hal_bt_l2cap_get_mtu();
     uint16_t max_chunk = (hal_mtu < sizeof(s_slip_chunk_buf)) ? hal_mtu : sizeof(s_slip_chunk_buf);
     
+    /* QA-18: Prevent runtime integer underflow/overflow if MTU is abnormally small */
+    if (max_chunk < 4) break;
+    
     while (s_slip_tx_current != NULL && chunk_idx < max_chunk - 2) {
                 uint8_t* payload = (uint8_t*)s_slip_tx_current->payload;
                 while (s_slip_tx_offset < s_slip_tx_current->len && chunk_idx < max_chunk - 2) {

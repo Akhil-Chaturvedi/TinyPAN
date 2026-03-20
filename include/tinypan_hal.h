@@ -156,17 +156,19 @@ typedef struct {
 
 /**
  * @brief Send a scatter-gather array over the L2CAP channel
- *
+ * 
  * The preferred TX interface for BNEP mode. The iovec array describes
  * a logical frame split across non-contiguous memory regions (e.g., a
  * synthesized BNEP header in local storage and the original lwIP pbuf payload).
  *
- * The HAL may copy the segments into an internal aligned buffer (bounce buffer)
- * or map them into hardware DMA descriptors. Either approach is valid, but the
- * HAL must fire HAL_L2CAP_EVENT_TX_COMPLETE once the data is no longer needed.
+ * **ASYNCHRONOUS CONTRACT:**
+ * The HAL may copy the segments into an internal aligned buffer (bounce buffer) 
+ * or map them into hardware DMA descriptors. The `iov` array and the buffers it 
+ * points to MUST be treated as immutable and persistent by the HAL until
+ * `HAL_L2CAP_EVENT_TX_COMPLETE` is fired. 
  *
- * The iov pointers are valid only until TX_COMPLETE is received. The BNEP
- * transport holds the pbuf reference alive across this window.
+ * TinyPAN guarantees that the `iov` descriptors passed here are stored in
+ * static transport state (not the stack) for the duration of the transmission.
  *
  * @param iov          Array of I/O vectors
  * @param iov_count    Number of vectors in the array

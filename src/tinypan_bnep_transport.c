@@ -104,6 +104,8 @@ typedef struct {
     struct pbuf* p;
     uint8_t hdr[15];
     uint8_t hdr_len;
+    tinypan_iovec_t iov[16]; /* QA-18: Must not be on stack for DMA safety */
+    uint16_t iov_count;
     bool in_flight;
 } bnep_tx_job_t;
 
@@ -138,12 +140,9 @@ void bnep_transport_drain_tx_queue(void) {
         /* Convert to iovec array: 
          * iov[0] = Synthesized BNEP header
          * iov[1..N] = Original pbuf, skipping the 14-byte Ethernet header */
-        tinypan_iovec_t iov[16];
-        uint16_t iov_count = 0;
-        
-        iov[0].iov_base = job->hdr;
-        iov[0].iov_len = job->hdr_len;
-        iov_count = 1;
+        job->iov[0].iov_base = job->hdr;
+        job->iov[0].iov_len = job->hdr_len;
+        job->iov_count = 1;
 
         /* Determine offset to skip the Ethernet header (14 bytes + pad) */
 #if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
@@ -153,22 +152,22 @@ void bnep_transport_drain_tx_queue(void) {
 #endif
 
         struct pbuf* iter = q;
-        while (iter != NULL && iov_count < 16) {
+        while (iter != NULL && job->iov_count < 16) {
             if (iter->len > 0) {
                 if (skip_bytes >= iter->len) {
                     /* Entire pbuf is skipped */
                     skip_bytes -= iter->len;
                 } else {
-                    iov[iov_count].iov_base = (const uint8_t*)iter->payload + skip_bytes;
-                    iov[iov_count].iov_len = iter->len - skip_bytes;
-                    iov_count++;
+                    job->iov[job->iov_count].iov_base = (const uint8_t*)iter->payload + skip_bytes;
+                    job->iov[job->iov_count].iov_len = iter->len - skip_bytes;
+                    job->iov_count++;
                     skip_bytes = 0; /* Only skip in the first block(s) */
                 }
             }
             iter = iter->next;
         }
         
-        if (iov_count <= 1) {
+        if (job->iov_count <= 1) {
             /* Empty frame (Ethernet header entirely skipped, no payload).
              * Drop cleanly as there is nothing to send besides the BNEP header. */
             TINYPAN_LOG_WARN("transport_bnep: Dropping empty payload frame");
@@ -177,7 +176,7 @@ void bnep_transport_drain_tx_queue(void) {
             TINYPAN_LOG_ERROR("transport_bnep: PBUF chain too long for iovec");
             result = -1;
         } else {
-            result = hal_bt_l2cap_send_iovec(iov, iov_count);
+            result = hal_bt_l2cap_send_iovec(job->iov, job->iov_count);
         }
         
         if (result == 0) {
