@@ -303,9 +303,10 @@ bool hal_bt_l2cap_can_send(void) {
 void hal_bt_l2cap_request_can_send_now(void) {
     portENTER_CRITICAL(&s_state_spinlock);
     bool connected = s_is_connected;
+    bool tx_busy = s_tx_busy;  /* Check congestion state */
     portEXIT_CRITICAL(&s_state_spinlock);
 
-    if (connected) {
+    if (connected && !tx_busy) {
         esp_event_msg_t msg;
         msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
         msg.status = 0;
@@ -329,18 +330,16 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
         memcpy(s_tx_aligned_buf, data, len);
         
         esp_err_t ret = esp_bt_l2cap_data_write(handle, s_tx_aligned_buf, len);
+        /* Contract: Do NOT fire TX_COMPLETE for contiguous send() */
         if (ret == ESP_OK) {
-            esp_event_msg_t tx_msg = { .event_id = HAL_L2CAP_EVENT_TX_COMPLETE, .status = 0 };
-            xQueueSend(s_event_queue, &tx_msg, 0);
             return 0;
         }
         return (ret == ESP_ERR_NO_MEM) ? 1 : -1;
     }
 
     esp_err_t ret = esp_bt_l2cap_data_write(handle, (uint8_t*)data, len);
+    /* Contract: Do NOT fire TX_COMPLETE for contiguous send() */
     if (ret == ESP_OK) {
-        esp_event_msg_t tx_msg = { .event_id = HAL_L2CAP_EVENT_TX_COMPLETE, .status = 0 };
-        xQueueSend(s_event_queue, &tx_msg, 0);
         return 0;
     }
     return (ret == ESP_ERR_NO_MEM) ? 1 : -1;

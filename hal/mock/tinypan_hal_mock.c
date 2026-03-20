@@ -235,8 +235,6 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
     
     TINYPAN_LOG_DEBUG("[MOCK] TX: %s", hex);
     
-    s_tx_complete_pending = true;
-    
     return 0; /* Success */
 }
 

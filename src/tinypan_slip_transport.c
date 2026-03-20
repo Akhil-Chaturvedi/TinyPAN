@@ -226,6 +226,16 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                         ((uint8_t*)s_slip_rx_curr_pbuf->payload)[s_slip_rx_curr_offset++] = c;
                         s_slip_rx_total_offset++;
                     }
+                } else {
+                    /* DoS/Corruption Guard: Drop over-sized frame explicitly */
+                    TINYPAN_LOG_ERROR("slip_rx: Escaped byte exceeded limit, dropping");
+                    pbuf_free(s_slip_rx_pbuf);
+                    s_slip_rx_pbuf = NULL;
+                    s_slip_rx_curr_pbuf = NULL;
+                    s_slip_rx_curr_offset = 0;
+                    s_slip_rx_total_offset = 0;
+                    s_slip_rx_seg_count = 0;
+                    s_slip_rx_seeking_end = true;
                 }
             } else if (c == SLIP_ESC) {
                 s_slip_rx_escape = true;

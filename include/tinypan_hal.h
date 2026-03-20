@@ -37,6 +37,10 @@ extern "C" {
  * @brief L2CAP event types passed to the event callback
  */
 typedef enum {
+    HAL_L2CAP_EVENT_CONNECTED = 1,      /**< L2CAP channel opened successfully */
+    HAL_L2CAP_EVENT_DISCONNECTED,       /**< L2CAP channel closed */
+    HAL_L2CAP_EVENT_CONNECT_FAILED,     /**< L2CAP connection attempt failed */
+    HAL_L2CAP_EVENT_CAN_SEND_NOW,       /**< Radio is ready to accept the next frame */
     HAL_L2CAP_EVENT_TX_COMPLETE         /**< Previous send_iovec call's data has been consumed by the radio.
                                              The transport layer uses this to release pbuf references.
                                              Must be fired once per successful send_iovec call.
