@@ -170,6 +170,14 @@ typedef struct {
  * TinyPAN guarantees that the `iov` descriptors passed here are stored in
  * static transport state (not the stack) for the duration of the transmission.
  *
+ * **POINTER PERSISTENCE & FLUSHING:**
+ * If the connection is lost or `tinypan_stop()` is called, TinyPAN will flush
+ * its internal queues. However, TinyPAN will NOT free the pbuf for any
+ * `in_flight` transmission. The HAL is guaranteed that the pointers in `iov`
+ * will remain valid until the HAL fires `HAL_L2CAP_EVENT_TX_COMPLETE`.
+ * The HAL must ensure it eventually fires this event for every successful
+ * send call to prevent memory leaks in the stack.
+ *
  * @param iov          Array of I/O vectors
  * @param iov_count    Number of vectors in the array
  * @return 0 on success, negative error code on failure, 1 if radio is busy/congested

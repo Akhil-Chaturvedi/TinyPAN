@@ -22,18 +22,10 @@ void tinypan_diag_print_status(void) {
     /* 2. IP Configuration */
     tinypan_ip_info_t info;
     if (tinypan_get_ip_info(&info) == TINYPAN_OK) {
-        uint32_t ip = info.ip_addr;
-        uint32_t gw = info.gateway;
-        printf("IP Address:       %u.%u.%u.%u\n",
-            (unsigned)(ip & 0xFF),
-            (unsigned)((ip >> 8) & 0xFF),
-            (unsigned)((ip >> 16) & 0xFF),
-            (unsigned)((ip >> 24) & 0xFF));
-        printf("Gateway:          %u.%u.%u.%u\n",
-            (unsigned)(gw & 0xFF),
-            (unsigned)((gw >> 8) & 0xFF),
-            (unsigned)((gw >> 16) & 0xFF),
-            (unsigned)((gw >> 24) & 0xFF));
+        const uint8_t* ip = (const uint8_t*)&info.ip_addr;
+        const uint8_t* gw = (const uint8_t*)&info.gateway;
+        printf("IP Address:       %u.%u.%u.%u\n", ip[0], ip[1], ip[2], ip[3]);
+        printf("Gateway:          %u.%u.%u.%u\n", gw[0], gw[1], gw[2], gw[3]);
     } else {
         printf("IP Address:       0.0.0.0 (Unassigned)\n");
     }

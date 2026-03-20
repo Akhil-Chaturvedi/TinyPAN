@@ -198,9 +198,17 @@ void bnep_transport_drain_tx_queue(void) {
 
 void bnep_transport_flush_tx_queue(void) {
     while (s_bnep_tx_head != s_bnep_tx_tail) {
-        if (s_bnep_tx_queue[s_bnep_tx_head].p != NULL) {
-            pbuf_free(s_bnep_tx_queue[s_bnep_tx_head].p);
-            s_bnep_tx_queue[s_bnep_tx_head].p = NULL;
+        bnep_tx_job_t* job = &s_bnep_tx_queue[s_bnep_tx_head];
+        
+        /* QA-21: Never free an in-flight packet. It is owned by the hardware 
+         * DMA controller. Let on_tx_complete clean it up. */
+        if (job->in_flight) {
+            break;
+        }
+
+        if (job->p != NULL) {
+            pbuf_free(job->p);
+            job->p = NULL;
         }
         s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
     }

@@ -50,6 +50,11 @@ Integration with a specific Bluetooth stack requires implementing the `tinypan_h
 5. **TX Lifecycle**: After a successful `send_iovec` call returns `0` (used by BNEP zero-copy DMA), the HAL must fire `HAL_L2CAP_EVENT_TX_COMPLETE` (via the event callback) once the radio is done with the submitted buffer. **Stack Safety:** To prevent deep recursion panics, the HAL must NOT fire this synchronously within the send context; instead, it must defer the callback to the next `hal_bt_poll()` cycle. **Note:** Contiguous `send` calls (used in SLIP mode) rely purely on synchronous return backpressure and must NOT fire this event to avoid event queue DoS.
 6. **RX Integration**: The HAL must invoke the registered `hal_l2cap_recv_callback_t` from the polling context or bridge incoming data through a thread-safe queue/ring buffer.
 
+### ESP32-C3 / ESP32-S3 (BLE-only/NimBLE)
+> [!IMPORTANT]
+> The provided `ports/esp32_classic/tinypan_hal_esp32.c` reference HAL targets the **Bluetooth Classic (BR/EDR)** L2CAP stack. 
+> To use TinyPAN in **Mode B (SLIP Bridge)** on BLE-only chips like the ESP32-C3, you must implement a wrapper for your chosen BLE stack (e.g., NimBLE or Bluedroid BLE GATT Server) that satisfies the `tinypan_hal.h` interface. 
+
 ### Threading and Reentrancy
 TinyPAN is non-reentrant. All library interactions -- including API calls and HAL callbacks -- must be synchronized to the same thread context as `tinypan_process()`. The provided reference ports (ESP32, Zephyr) bridge interrupt/callback-context events to the application thread using static ring buffers.
 
