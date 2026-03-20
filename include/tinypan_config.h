@@ -143,6 +143,16 @@
 #endif
 
 /**
+ * Maximum payload chunk size for SLIP over BLE.
+ * Defaults to 247 for BLE 4.2+ Data Length Extension MTUs.
+ * Adjust this to 20 if your BLE stack or client negotiates legacy MTUs,
+ * otherwise HALs like Zephyr bt_nus_send will return -EMSGSIZE and drop frames.
+ */
+#ifndef TINYPAN_SLIP_CHUNK_SIZE
+#define TINYPAN_SLIP_CHUNK_SIZE             247
+#endif
+
+/**
  * Enable heartbeat/link monitoring.
  * Reserved for future use. The supervisor currently operates on transport-layer
  * connectivity events.

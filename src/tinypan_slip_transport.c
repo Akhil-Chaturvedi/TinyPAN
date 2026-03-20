@@ -88,7 +88,7 @@ static uint8_t s_slip_tx_tail = 0;
 
 /* Fits a standard 247-byte BLE 4.2+ Data Length Extension MTU without
  * artificially fragmenting it and causing extra RTOS context switches */
-static uint8_t s_slip_chunk_buf[255];
+static uint8_t s_slip_chunk_buf[TINYPAN_SLIP_CHUNK_SIZE];
 static uint16_t s_slip_chunk_len = 0;
 static struct pbuf* s_slip_tx_current = NULL; /* Tracks current segment in the chain */
 static uint16_t s_slip_tx_offset = 0;

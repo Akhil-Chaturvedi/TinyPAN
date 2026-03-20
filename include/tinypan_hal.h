@@ -37,15 +37,12 @@ extern "C" {
  * @brief L2CAP event types passed to the event callback
  */
 typedef enum {
-    HAL_L2CAP_EVENT_CONNECTED = 1,      /**< L2CAP channel opened successfully */
-    HAL_L2CAP_EVENT_DISCONNECTED,       /**< L2CAP channel closed */
-    HAL_L2CAP_EVENT_CONNECT_FAILED,     /**< L2CAP connection attempt failed */
-    HAL_L2CAP_EVENT_CAN_SEND_NOW,       /**< Radio is ready to accept the next frame */
-    HAL_L2CAP_EVENT_TX_COMPLETE         /**< Previous send call's data has been consumed by the radio.
+    HAL_L2CAP_EVENT_TX_COMPLETE         /**< Previous send_iovec call's data has been consumed by the radio.
                                              The transport layer uses this to release pbuf references.
-                                             Must be fired once per successful send call.
+                                             Must be fired once per successful send_iovec call.
                                              On HALs that copy into an internal buffer, fire immediately.
-                                             On HALs that use DMA, fire from the TX-done ISR/callback. */
+                                             On HALs that use DMA, fire from the TX-done ISR/callback.
+                                             NOTE: Do not fire for contiguous hal_bt_l2cap_send() calls. */
 } hal_l2cap_event_t;
 
 /* ============================================================================
@@ -128,11 +125,9 @@ void hal_bt_l2cap_disconnect(void);
  * Sends a single contiguous buffer over the Bluetooth channel. Used primarily
  * for BNEP control packets and SLIP-mode data.
  *
- * On success (return 0), the HAL must fire HAL_L2CAP_EVENT_TX_COMPLETE via
- * the event callback once the data has been consumed by the radio or copied
- * into an internal send buffer. Until that event is received, the caller
- * must not reuse the buffer (though for SLIP mode, the HAL typically copies
- * internally so the buffer is safe to reuse immediately).
+ * This function relies exclusively on return values for backpressure (returns
+ * 1 if busy). The HAL should NOT fire HAL_L2CAP_EVENT_TX_COMPLETE for this
+ * function. Once it returns 0, the caller assumes the data has been copied.
  *
  * @param data         Pointer to the frame
  * @param len          Total length of the frame

@@ -26,7 +26,7 @@ The BNEP transport (`tinypan_bnep_transport.c`) implements zero-copy for IP payl
 The `pbuf` is held in-queue until the HAL fires `HAL_L2CAP_EVENT_TX_COMPLETE`, at which point `pbuf_free` is called. Only one frame is in-flight at a time. HAL implementations that copy data internally (e.g., Bluedroid's `esp_bt_l2cap_data_write`) may fire `TX_COMPLETE` immediately; HAL implementations that perform true DMA must fire it only after the hardware signals completion.
 
 ### SLIP Encoder
-The SLIP transport encodes outgoing `pbuf` chains on the fly into a 255-byte staging buffer—a size optimized for modern BLE 4.2+ Data Length Extension (DLE) MTUs. Contiguous runs of non-escape bytes are copied in bulk; only bytes requiring escaping (`0xC0`, `0xDB`) are handled individually. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is acknowledged by the HAL.
+The SLIP transport encodes outgoing `pbuf` chains on the fly into a configurable staging buffer (default 247 bytes, set via `TINYPAN_SLIP_CHUNK_SIZE`)—a size optimized for modern BLE 4.2+ Data Length Extension (DLE) MTUs. Contiguous runs of non-escape bytes are copied in bulk; only bytes requiring escaping (`0xC0`, `0xDB`) are handled individually. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is acknowledged by the HAL.
 
 ### SLIP Decoder
 Incoming SLIP bytes are accumulated directly into pool-allocated (`PBUF_POOL`) segments via a streaming FSM. A single incoming frame is bounded to 2 pool segments (~3 KB). If a frame exceeds this limit, the FSM enters a `seeking_end` state and pauses pool allocations until a `SLIP_END` delimiter is reached, preventing memory-pool thrashing during error recovery. When a valid frame is completed, the last segment is trimmed with `pbuf_realloc` to the exact data length.
@@ -46,7 +46,7 @@ Integration with a specific Bluetooth stack requires implementing the `tinypan_h
 2. **`hal_bt_l2cap_send()`**: Transmit a contiguous buffer. Used for SLIP streaming and BNEP control packets.
 3. **`hal_bt_l2cap_connect()`**: Initiate an L2CAP channel to a remote BD_ADDR.
 4. **`hal_get_tick_ms()`**: Provide a monotonic millisecond counter. Wrap-around is handled correctly.
-5. **TX Lifecycle**: After a successful send call returns `0`, the HAL must fire `HAL_L2CAP_EVENT_TX_COMPLETE` (via the event callback) once the radio is done with the submitted buffer. For HALs that copy data internally, this can be fired immediately. For HALs that submit DMA descriptors, it must be deferred until the hardware completion interrupt.
+5. **TX Lifecycle**: After a successful `send_iovec` call returns `0` (used by BNEP zero-copy DMA), the HAL must fire `HAL_L2CAP_EVENT_TX_COMPLETE` (via the event callback) once the radio is done with the submitted buffer. For HALs that copy data internally, this can be fired immediately (via `hal_bt_poll`). For HALs that submit DMA descriptors, it must be deferred until the hardware completion interrupt. **Note:** Contiguous `send` calls (used in SLIP mode) rely purely on synchronous return backpressure and must NOT fire this event to avoid event queue DoS.
 6. **RX Integration**: The HAL must invoke the registered `hal_l2cap_recv_callback_t` from the polling context or bridge incoming data through a thread-safe queue/ring buffer.
 
 ### Threading and Reentrancy

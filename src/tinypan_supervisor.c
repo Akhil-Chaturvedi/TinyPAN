@@ -319,6 +319,11 @@ void supervisor_on_l2cap_event(int event, int status) {
                     s_setup_retries = 0;
                 } else {
                     set_state(TINYPAN_STATE_DHCP);
+#if TINYPAN_ENABLE_LWIP
+                    /* For setup-less transports (SLIP), link is logically UP immediately */
+                    tinypan_netif_set_link(true);
+                    tinypan_netif_start_dhcp();
+#endif
                 }
             }
             break;

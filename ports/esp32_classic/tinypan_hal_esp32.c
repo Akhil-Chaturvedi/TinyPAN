@@ -327,16 +327,14 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
     if (((uintptr_t)data & 3) != 0) {
         if (len > sizeof(s_tx_aligned_buf)) return -1;
         memcpy(s_tx_aligned_buf, data, len);
-        portENTER_CRITICAL(&s_state_spinlock);
-        s_tx_busy = true; /* Optimistic lock */
-        portEXIT_CRITICAL(&s_state_spinlock);
-        esp_err_t ret = esp_bt_l2cap_vfs_send(handle, s_tx_aligned_buf, len);
-        if (ret != ESP_OK) {
-            portENTER_CRITICAL(&s_state_spinlock);
-            s_tx_busy = false; /* Rollback */
-            portEXIT_CRITICAL(&s_state_spinlock);
+        
+        esp_err_t ret = esp_bt_l2cap_data_write(handle, s_tx_aligned_buf, len);
+        if (ret == ESP_OK) {
+            esp_event_msg_t tx_msg = { .event_id = HAL_L2CAP_EVENT_TX_COMPLETE, .status = 0 };
+            xQueueSend(s_event_queue, &tx_msg, 0);
+            return 0;
         }
-        return (ret == ESP_OK) ? 0 : -1;
+        return (ret == ESP_ERR_NO_MEM) ? 1 : -1;
     }
 
     esp_err_t ret = esp_bt_l2cap_data_write(handle, (uint8_t*)data, len);

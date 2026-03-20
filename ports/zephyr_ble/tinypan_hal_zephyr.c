@@ -249,11 +249,6 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
         return -1;
     }
 
-    struct z_event_msg msg;
-    msg.event_id = HAL_L2CAP_EVENT_TX_COMPLETE;
-    msg.status = 0;
-    k_msgq_put(&s_zephyr_event_q, &msg, K_NO_WAIT);
-
     return 0;
 }
 
