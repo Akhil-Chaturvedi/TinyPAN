@@ -2,8 +2,14 @@
  * TinyPAN SLIP Transport Backend
  *
  * Implements tinypan_transport_t for BLE SLIP companion mode.
- * Features a streaming FSM for zero-buffer RX (writing directly to pbuf chains)
- * and persistent TX queue drainage to handle radio backpressure.
+ *
+ * TX: Encodes outgoing pbuf chains in-place using a memchr-based bulk copy loop
+ * into a 128-byte staging buffer, flushed via hal_bt_l2cap_send(). The original
+ * pbuf is held by reference (pbuf_ref) and freed when transmission completes.
+ *
+ * RX: Accumulates incoming bytes from the HAL into PBUF_POOL segments via a
+ * streaming FSM. A single frame is capped at 2 pool segments to prevent pool
+ * exhaustion from malformed or incomplete SLIP streams.
  */
 
 #include "tinypan_transport.h"
@@ -57,6 +63,7 @@ static struct pbuf* s_slip_rx_pbuf = NULL;
 static struct pbuf* s_slip_rx_curr_pbuf = NULL;
 static uint16_t s_slip_rx_curr_offset = 0;
 static uint16_t s_slip_rx_total_offset = 0;
+static uint8_t s_slip_rx_seg_count = 0;
 static bool s_slip_rx_escape = false;
 
 /* TX State Machine */
@@ -88,6 +95,7 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
             s_slip_rx_curr_pbuf = s_slip_rx_pbuf;
             s_slip_rx_curr_offset = 0;
             s_slip_rx_total_offset = 0;
+            s_slip_rx_seg_count = 1;
             s_slip_rx_escape = false;
         }
 
@@ -115,13 +123,18 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                 uint16_t space = s_slip_rx_curr_pbuf->len - s_slip_rx_curr_offset;
                 if (space == 0) {
                     /* Current segment is full, allocate next one if not and if we are within limits */
-                    if (s_slip_rx_total_offset >= TINYPAN_MAX_FRAME_SIZE) break;
+                    /* DoS Guard: Limit pool exhaustion. We already cap total length at 1500,
+                     * but if the pool segment size is small, a frame could eat too many segments.
+                     * For standard 1536-byte segments, 2 segments is the upper bound for one frame. */
+                    if (s_slip_rx_seg_count >= 2) break;
+
                     struct pbuf* next = pbuf_alloc(PBUF_RAW, PBUF_POOL_BUFSIZE, PBUF_POOL);
                     if (next == NULL) { /* OOM */
                         pbuf_free(s_slip_rx_pbuf);
                         s_slip_rx_pbuf = NULL;
                         return;
                     }
+                    s_slip_rx_seg_count++;
                     pbuf_cat(s_slip_rx_pbuf, next);
                     s_slip_rx_curr_pbuf = next;
                     s_slip_rx_curr_offset = 0;
@@ -325,8 +338,10 @@ static int slip_transport_output(struct netif* netif, struct pbuf* p) {
     (void)netif;
     if (p == NULL) return ERR_ARG;
     
-    struct pbuf* q = pbuf_clone(PBUF_LINK, PBUF_RAM, p);
-    if (!q) return ERR_MEM;
+    /* Incref the original pbuf. The drain loop will free it.
+     * We avoid pbuf_clone(PBUF_RAM) because it would eat the heap. */
+    pbuf_ref(p);
+    struct pbuf* q = p;
 
     uint8_t next_tail = (s_slip_tx_tail + 1) % TINYPAN_TX_QUEUE_LEN;
     if (next_tail == s_slip_tx_head) {

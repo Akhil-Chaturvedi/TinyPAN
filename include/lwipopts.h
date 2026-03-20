@@ -49,9 +49,12 @@
 
 /* Memory configuration */
 #define MEM_ALIGNMENT               4
-#define MEM_SIZE                    (4 * 1024)  /* 4KB heap for packets/state */
+#define MEM_SIZE                    (4 * 1024)  /* 4KB heap: DHCP/ARP state + lwIP internal allocations (TCP is disabled) */
 
-/* PBUF pool sizing */
+/* PBUF pool sizing.
+ * PBUF_POOL is the only allocator used for RX and TX data segments.
+ * The SLIP RX path caps inbound frame buffering at 2 segments per frame,
+ * leaving the remaining pool available for ARP and DHCP. */
 #define PBUF_POOL_SIZE              4
 #define PBUF_POOL_BUFSIZE           1536
 

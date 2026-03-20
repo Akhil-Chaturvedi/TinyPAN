@@ -24,10 +24,10 @@ Targeted at BLE-only controllers (e.g., nRF52, ESP32-C3).
 The BNEP transport (`tinypan_bnep_transport.c`) uses `pbuf_header()` to write the BNEP header in-place into the headroom reserved by lwIP (`PBUF_LINK_ENCAPSULATION_HLEN = 15` bytes). No additional pbuf allocations or memory copies are performed in the transport layer. The HAL layer may still require linearization into a contiguous buffer depending on the radio controller's DMA requirements.
 
 ### SLIP Encoder
-The SLIP transport encodes outgoing `pbuf` chains on the fly using a `memchr`-based scan. Contiguous runs of non-escape bytes are emitted in a single write call. Only bytes that require escaping (`0xC0`, `0xDB`) cause individual byte-by-byte output.
+The SLIP transport encodes outgoing `pbuf` chains on the fly using a `memchr`-based scan into a 128-byte staging buffer. Contiguous runs of non-escape bytes are copied in bulk; only bytes requiring escaping (`0xC0`, `0xDB`) are handled individually. The original pbuf is held by reference (`pbuf_ref`) and freed after transmission, avoiding any intermediate heap allocation.
 
 ### SLIP Decoder
-Incoming SLIP bytes are accumulated into pool-allocated (`PBUF_POOL`) segments of `PBUF_POOL_BUFSIZE` bytes. When a frame-end marker is received, the last segment is trimmed with `pbuf_realloc` to the actual data length. Peak RAM usage is bounded by the pool size configuration in `lwipopts.h`.
+Incoming SLIP bytes are accumulated directly into pool-allocated (`PBUF_POOL`) segments via a streaming FSM. A single incoming frame is limited to 2 pool segments (~3 KB) regardless of `TINYPAN_MAX_FRAME_SIZE`. This prevents a malformed or incomplete SLIP stream from exhausting the pool and stalling other stack operations (ARP/DHCP). When a frame-end marker (`0xC0`) is received, the last segment is trimmed with `pbuf_realloc` to the actual data length.
 
 ### Resource Metrics (Typical 32-bit MCU)
 - **Library BSS/Data:** < 400 bytes (core and transport state, excluding lwIP pool)
