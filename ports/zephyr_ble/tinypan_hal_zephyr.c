@@ -53,8 +53,10 @@ struct z_event_msg {
    ring buffer so the BLE callback returns immediately without blocking. */
 K_MSGQ_DEFINE(s_zephyr_event_q, sizeof(struct z_event_msg), 16, 4);
 
-/* Concurrency: Lock-free Zephyr Ring Buffer replaces K_MUTEX_DEFINE to prevent stalls */
-RING_BUF_DECLARE(s_rx_ringbuf, 512);
+/* Concurrency: Lock-free Zephyr Ring Buffer replaces K_MUTEX_DEFINE to prevent stalls.
+ * Size must hold at least one full MTU-sized SLIP frame (~1500B after encoding)
+ * plus one additional BLE notification packet to prevent mid-frame drops. */
+RING_BUF_DECLARE(s_rx_ringbuf, TINYPAN_L2CAP_MTU + 256);
 
 /* SLIP TX Chunker */
 /* TinyPAN passes ~1500 byte SLIP MTU frames. NUS must chunk them to BLE MTU */

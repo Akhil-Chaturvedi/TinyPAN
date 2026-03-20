@@ -8,6 +8,8 @@
 #ifndef TINYPAN_CONFIG_H
 #define TINYPAN_CONFIG_H
 
+#include <stdint.h>
+
 /* ============================================================================
  * Memory Configuration
  * ============================================================================ */
@@ -49,10 +51,9 @@
  * Due to the ring buffer design, the usable capacity is one less than
  * this value (e.g., 3 slots hold up to 2 frames in flight).
  *
- * Tuning: TCP congestion control handles backpressure from ERR_MEM
- * returns naturally, but very small queues with high BLE round-trip latency
- * can reduce throughput through excessive retransmissions. 3 is the default
- * to limit peak memory use during TCP burst scenarios on low-RAM targets.
+ * Tuning: A small queue limits peak memory pressure on low-RAM targets. While TCP
+ * is disabled by default in lwipopts.h, this value still serves to bound the
+ * number of broadcast or bursty UDP frames held in flight before dropping.
  */
 #ifndef TINYPAN_TX_QUEUE_LEN
 #define TINYPAN_TX_QUEUE_LEN                3
@@ -224,7 +225,10 @@
 #else
 
 #ifndef TINYPAN_HTONS
-#define TINYPAN_HTONS(x)    ((((x) & 0xFF) << 8) | (((x) >> 8) & 0xFF))
+static inline uint16_t tinypan_htons(uint16_t x) {
+    return (uint16_t)((((x) & 0x00FFU) << 8) | (((x) & 0xFF00U) >> 8));
+}
+#define TINYPAN_HTONS(x)    tinypan_htons(x)
 #endif
 
 #ifndef TINYPAN_NTOHS
@@ -232,8 +236,11 @@
 #endif
 
 #ifndef TINYPAN_HTONL
-#define TINYPAN_HTONL(x)    ((((x) & 0xFF) << 24) | (((x) & 0xFF00) << 8) | \
-                             (((x) >> 8) & 0xFF00) | (((x) >> 24) & 0xFF))
+static inline uint32_t tinypan_htonl(uint32_t x) {
+    return ((((x) & 0x000000FFUL) << 24) | (((x) & 0x0000FF00UL) << 8) | \
+            (((x) & 0x00FF0000UL) >> 8) | (((x) & 0xFF000000UL) >> 24));
+}
+#define TINYPAN_HTONL(x)    tinypan_htonl(x)
 #endif
 
 #ifndef TINYPAN_NTOHL

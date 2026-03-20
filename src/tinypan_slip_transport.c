@@ -126,7 +126,12 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                     /* DoS Guard: Limit pool exhaustion. We already cap total length at 1500,
                      * but if the pool segment size is small, a frame could eat too many segments.
                      * For standard 1536-byte segments, 2 segments is the upper bound for one frame. */
-                    if (s_slip_rx_seg_count >= 2) break;
+                    if (s_slip_rx_seg_count >= 2) {
+                        TINYPAN_LOG_ERROR("slip_rx: Frame exceeded segment limit, dropping");
+                        pbuf_free(s_slip_rx_pbuf);
+                        s_slip_rx_pbuf = NULL;
+                        return;
+                    }
 
                     struct pbuf* next = pbuf_alloc(PBUF_RAW, PBUF_POOL_BUFSIZE, PBUF_POOL);
                     if (next == NULL) { /* OOM */
