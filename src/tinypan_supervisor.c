@@ -394,6 +394,16 @@ void supervisor_on_l2cap_event(int event, int status) {
 #endif
             break;
             
+        case HAL_L2CAP_EVENT_TX_COMPLETE:
+            TINYPAN_LOG_DEBUG("L2CAP TX complete");
+            {
+                const tinypan_transport_t* transport = tinypan_transport_get();
+                if (transport && transport->on_tx_complete) {
+                    transport->on_tx_complete();
+                }
+            }
+            break;
+            
         default:
             TINYPAN_LOG_WARN("Unknown L2CAP event: %d", event);
             break;

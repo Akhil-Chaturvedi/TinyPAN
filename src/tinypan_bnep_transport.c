@@ -104,6 +104,7 @@ typedef struct {
     struct pbuf* p;
     uint8_t hdr[15];
     uint8_t hdr_len;
+    bool in_flight;
 } bnep_tx_job_t;
 
 static bnep_tx_job_t s_bnep_tx_queue[TINYPAN_TX_QUEUE_LEN];
@@ -125,6 +126,12 @@ void bnep_transport_drain_tx_queue(void) {
         }
         
         bnep_tx_job_t* job = &s_bnep_tx_queue[s_bnep_tx_head];
+        
+        if (job->in_flight) {
+            /* Wait for TX completion interrupt from hardware */
+            break;
+        }
+        
         struct pbuf* q = job->p;
         int result = 0;
         
@@ -165,7 +172,7 @@ void bnep_transport_drain_tx_queue(void) {
             /* Empty frame (Ethernet header entirely skipped, no payload).
              * Drop cleanly as there is nothing to send besides the BNEP header. */
             TINYPAN_LOG_WARN("transport_bnep: Dropping empty payload frame");
-            result = 0;
+            result = -1;
         } else if (iter != NULL) {
             TINYPAN_LOG_ERROR("transport_bnep: PBUF chain too long for iovec");
             result = -1;
@@ -174,10 +181,9 @@ void bnep_transport_drain_tx_queue(void) {
         }
         
         if (result == 0) {
-            /* Success */
-            job->p = NULL;
-            s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
-            pbuf_free(q);
+            /* Success - HW DMA transfer initiated. Wait for complete event. */
+            job->in_flight = true;
+            break; /* Standard L2CAP serialization requires one packet at a time */
         } else if (result > 0) {
             hal_bt_l2cap_request_can_send_now();
             break;
@@ -198,6 +204,22 @@ void bnep_transport_flush_tx_queue(void) {
             s_bnep_tx_queue[s_bnep_tx_head].p = NULL;
         }
         s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
+    }
+}
+
+static void bnep_transport_on_tx_complete(void) {
+    if (s_bnep_tx_head != s_bnep_tx_tail) {
+        bnep_tx_job_t* job = &s_bnep_tx_queue[s_bnep_tx_head];
+        if (job->in_flight) {
+            struct pbuf* q = job->p;
+            job->p = NULL;
+            job->in_flight = false;
+            s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
+            if (q) pbuf_free(q);
+            
+            /* Process next packet */
+            bnep_transport_drain_tx_queue();
+        }
     }
 }
 
@@ -243,6 +265,7 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
     pbuf_ref(p);
     job->p = p;
     job->hdr_len = bnep_hdr_len;
+    job->in_flight = false;
     bnep_write_ethernet_header(job->hdr, bnep_hdr_len, dst_addr, src_addr, ethertype);
     
     s_bnep_tx_tail = next_tail;
@@ -264,6 +287,7 @@ const tinypan_transport_t transport_bnep = {
     .handle_incoming = bnep_transport_handle_incoming,
     .retry_setup = bnep_transport_retry_setup,
     .on_can_send_now = bnep_transport_on_can_send_now,
+    .on_tx_complete = bnep_transport_on_tx_complete,
     .flush_queues = bnep_transport_flush_tx_queue,
 #if TINYPAN_ENABLE_LWIP
     .output = bnep_transport_output

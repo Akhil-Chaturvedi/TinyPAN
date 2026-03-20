@@ -65,6 +65,11 @@ typedef struct {
     void (*on_can_send_now)(void);
     
     /**
+     * @brief Called when the HAL signals TX_COMPLETE
+     */
+    void (*on_tx_complete)(void);
+    
+    /**
      * @brief Clear and free any pending TX queues (e.g. on disconnect)
      */
     void (*flush_queues)(void);

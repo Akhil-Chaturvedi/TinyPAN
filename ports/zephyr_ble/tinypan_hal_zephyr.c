@@ -60,9 +60,6 @@ RING_BUF_DECLARE(s_rx_ringbuf, TINYPAN_L2CAP_MTU + 256);
 
 /* SLIP TX Chunker */
 /* TinyPAN passes ~1500 byte SLIP MTU frames. NUS must chunk them to BLE MTU */
-static uint8_t s_tx_buf[1500];
-static uint16_t s_tx_len = 0;
-static uint16_t s_tx_offset = 0;
 static bool s_tx_notify_pending = false;
 
 /* ============================================================================
@@ -95,40 +92,13 @@ void hal_bt_poll(void) {
         }
     }
 
-    /* 3. Drain pending SLIP TX chunks */
-    if (s_tx_len > 0 && s_current_conn) {
-        uint16_t mtu = bt_gatt_get_mtu(s_current_conn);
-        /* NUS payload is MTU - 3 (opcode + handle). Safe default is 20 if MTU unknown. */
-        uint16_t chunk_max = (mtu > 3) ? (mtu - 3) : 20;
-
-        while (s_tx_offset < s_tx_len) {
-            uint16_t remain = s_tx_len - s_tx_offset;
-            uint16_t chunk = (remain > chunk_max) ? chunk_max : remain;
-
-            int err = bt_nus_send(s_current_conn, &s_tx_buf[s_tx_offset], chunk);
-            if (err == -ENOMEM) {
-                /* Controller TX buffers full, stop chunking and wait for next poll */
-                break;
-            } else if (err) {
-                /* Hard error, drop the rest of the frame */
-                printk("bt_nus_send failed: %d\n", err);
-                s_tx_len = 0;
-                break;
-            }
-            s_tx_offset += chunk;
-        }
-
-        /* If we finished the frame and there is a pending CAN_SEND_NOW request, fire it */
-        if (s_tx_offset >= s_tx_len && s_tx_len > 0) {
-            s_tx_len = 0;
-            if (s_tx_notify_pending) {
-                s_tx_notify_pending = false;
-                struct z_event_msg msg;
-                msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
-                msg.status = 0;
-                k_msgq_put(&s_zephyr_event_q, &msg, K_NO_WAIT);
-            }
-        }
+    /* 3. Drain pending CAN_SEND_NOW events */
+    if (s_current_conn && s_tx_notify_pending) {
+        s_tx_notify_pending = false;
+        struct z_event_msg msg;
+        msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
+        msg.status = 0;
+        k_msgq_put(&s_zephyr_event_q, &msg, K_NO_WAIT);
     }
 }
 
@@ -259,65 +229,39 @@ void hal_bt_l2cap_register_event_callback(hal_l2cap_event_callback_t cb, void* u
 }
 
 bool hal_bt_l2cap_can_send(void) {
-    return (s_current_conn != NULL) && (s_tx_len == 0);
+    return (s_current_conn != NULL);
 }
 
 void hal_bt_l2cap_request_can_send_now(void) {
     if (s_current_conn) {
-        if (s_tx_len == 0) {
-            /* Ready right now! */
-            struct z_event_msg msg;
-            msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
-            msg.status = 0;
-            k_msgq_put(&s_zephyr_event_q, &msg, K_NO_WAIT);
-        } else {
-            /* Defer until chunker finishes the current frame */
-            s_tx_notify_pending = true;
-        }
+        s_tx_notify_pending = true;
     }
 }
 
 int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
     if (!s_current_conn) return -1;
-    if (len > sizeof(s_tx_buf)) return -1;
 
-    if (s_tx_len > 0) {
+    int err = bt_nus_send(s_current_conn, data, len);
+    if (err == -ENOMEM) {
         return 1;
+    } else if (err < 0) {
+        printk("bt_nus_send failed: %d\n", err);
+        return -1;
     }
 
-    /* Accept the frame and begin asynchronous chunking task in poll() loop */
-    memcpy(s_tx_buf, data, len);
-    s_tx_len = len;
-    s_tx_offset = 0;
-    
-    /* Return success to TinyPAN so it drops the buffer (we now own it in s_tx_buf) */
+    struct z_event_msg msg;
+    msg.event_id = HAL_L2CAP_EVENT_TX_COMPLETE;
+    msg.status = 0;
+    k_msgq_put(&s_zephyr_event_q, &msg, K_NO_WAIT);
+
     return 0;
 }
 
 int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
-    if (!s_current_conn) return -1;
-
-    if (s_tx_len > 0) {
-        return 1;
-    }
-
-    uint32_t total_len = 0;
-    for (uint16_t i = 0; i < iov_count; i++) {
-        total_len += iov[i].iov_len;
-    }
-    
-    if (total_len > sizeof(s_tx_buf)) return -1;
-
-    uint32_t offset = 0;
-    for (uint16_t i = 0; i < iov_count; i++) {
-        memcpy(s_tx_buf + offset, iov[i].iov_base, iov[i].iov_len);
-        offset += iov[i].iov_len;
-    }
-
-    s_tx_len = (uint16_t)total_len;
-    s_tx_offset = 0;
-    
-    return 0;
+    (void)iov;
+    (void)iov_count;
+    /* SLIP over BLE NUS does not natively support BNEP scatter-gather. */
+    return -1;
 }
 
 void hal_get_local_bd_addr(uint8_t addr[HAL_BD_ADDR_LEN]) {

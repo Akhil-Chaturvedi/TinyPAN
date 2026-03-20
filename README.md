@@ -21,7 +21,9 @@ Targeted at BLE-only controllers (e.g., nRF52, ESP32-C3).
 ## Memory Design
 
 ### BNEP Transmission
-The BNEP transport (`tinypan_bnep_transport.c`) implements zero-copy for IP payloads via scatter-gather DMA mapping. Outgoing `pbuf` chains are mapped to a `tinypan_iovec_t` array where `iov[0]` is a locally synthesized BNEP header (supporting Type 0x00 and Type 0x02 formats). Subsequent `iovec` entries point directly to the original `pbuf->payload` segments, skipping the Ethernet header. This prevents mutation of shared lwIP memory, ensuring safety for concurrent TCP retransmissions.
+The BNEP transport (`tinypan_bnep_transport.c`) implements zero-copy for IP payloads via scatter-gather mapping. Outgoing `pbuf` chains are mapped to a `tinypan_iovec_t` array where `iov[0]` is a locally synthesized BNEP header (Type 0x00 or Type 0x02). Subsequent `iovec` entries reference the original `pbuf->payload` segments directly, skipping the Ethernet header, without mutating shared lwIP memory.
+
+The `pbuf` is held in-queue until the HAL fires `HAL_L2CAP_EVENT_TX_COMPLETE`, at which point `pbuf_free` is called. Only one frame is in-flight at a time. HAL implementations that copy data internally (e.g., Bluedroid's `esp_bt_l2cap_data_write`) may fire `TX_COMPLETE` immediately; HAL implementations that perform true DMA must fire it only after the hardware signals completion.
 
 ### SLIP Encoder
 The SLIP transport encodes outgoing `pbuf` chains on the fly into a 255-byte staging buffer—a size optimized for modern BLE 4.2+ Data Length Extension (DLE) MTUs. Contiguous runs of non-escape bytes are copied in bulk; only bytes requiring escaping (`0xC0`, `0xDB`) are handled individually. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is acknowledged by the HAL.
@@ -34,17 +36,18 @@ Incoming SLIP bytes are accumulated directly into pool-allocated (`PBUF_POOL`) s
 - **Flash (Text):** ~12-18 KB, mode dependent
 - **lwIP Heap/Pool:** Configurable; defaults to 4 byte-aligned segments (6.8KB pool) plus 4KB heap.
 - **ESP32 HAL RAM:** ~8.6 KB static RAM (6.8KB RX ring buffer + 1.7KB TX bounce buffer). Configurable via `TINYPAN_ESP_RX_RING_SLOTS`.
-- **Zephyr HAL RAM:** ~3.6 KB static RAM (1.9KB RX ring buffer + 1.7KB TX staging buffer).
+- **Zephyr HAL RAM:** ~1.9 KB static RAM (RX ring buffer only). The SLIP transport chunks to BLE MTU; the HAL does not maintain a separate TX buffer.
 
 ## Hardware Abstraction Layer (HAL)
 
 Integration with a specific Bluetooth stack requires implementing the `tinypan_hal.h` interface:
 
-1. **`hal_bt_l2cap_send_iovec()`**: Transmit a scatter-gather array. The primary TX interface.
-2. **`hal_bt_l2cap_send()`**: Transmit a contiguous buffer. Primarily used for SLIP streaming.
+1. **`hal_bt_l2cap_send_iovec()`**: Transmit a scatter-gather array. The primary TX interface for BNEP mode.
+2. **`hal_bt_l2cap_send()`**: Transmit a contiguous buffer. Used for SLIP streaming and BNEP control packets.
 3. **`hal_bt_l2cap_connect()`**: Initiate an L2CAP channel to a remote BD_ADDR.
 4. **`hal_get_tick_ms()`**: Provide a monotonic millisecond counter. Wrap-around is handled correctly.
-5. **RX Integration**: The HAL must invoke the registered `hal_l2cap_recv_callback_t` from the polling context or bridge incoming data through a thread-safe queue/ring buffer.
+5. **TX Lifecycle**: After a successful send call returns `0`, the HAL must fire `HAL_L2CAP_EVENT_TX_COMPLETE` (via the event callback) once the radio is done with the submitted buffer. For HALs that copy data internally, this can be fired immediately. For HALs that submit DMA descriptors, it must be deferred until the hardware completion interrupt.
+6. **RX Integration**: The HAL must invoke the registered `hal_l2cap_recv_callback_t` from the polling context or bridge incoming data through a thread-safe queue/ring buffer.
 
 ### Threading and Reentrancy
 TinyPAN is non-reentrant. All library interactions -- including API calls and HAL callbacks -- must be synchronized to the same thread context as `tinypan_process()`. The provided reference ports (ESP32, Zephyr) bridge interrupt/callback-context events to the application thread using static ring buffers.

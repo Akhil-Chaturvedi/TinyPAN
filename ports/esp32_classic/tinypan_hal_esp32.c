@@ -178,18 +178,7 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
             }
             break;
 
-        case ESP_BT_L2CAP_UNPONG_EVT: // This event type is not standard ESP-IDF, assuming it's a placeholder or custom event
-            portENTER_CRITICAL(&s_state_spinlock);
-            s_tx_busy = false;
-            portEXIT_CRITICAL(&s_state_spinlock);
-            event_msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
-            if (xQueueSend(s_event_queue, &event_msg, 0) != pdTRUE) {
-                /* Queue full: the supervisor cannot learn of this disconnect.
-                 * The supervision timeout in the supervisor will eventually recover,
-                 * but log the anomaly for diagnostics. */
-                ESP_LOGE(TAG, "Event queue full on DISCONNECTED; supervisor will timeout");
-            }
-            break;
+
 
         default:
             ESP_LOGD(TAG, "Unhandled L2CAP event: %d", event);
@@ -350,16 +339,13 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
         return (ret == ESP_OK) ? 0 : -1;
     }
 
-    portENTER_CRITICAL(&s_state_spinlock);
-    s_tx_busy = true; /* Optimistic lock */
-    portEXIT_CRITICAL(&s_state_spinlock);
-    esp_err_t ret = esp_bt_l2cap_vfs_send(handle, (uint8_t*)data, len);
-    if (ret != ESP_OK) {
-        portENTER_CRITICAL(&s_state_spinlock);
-        s_tx_busy = false; /* Rollback */
-        portEXIT_CRITICAL(&s_state_spinlock);
+    esp_err_t ret = esp_bt_l2cap_data_write(handle, (uint8_t*)data, len);
+    if (ret == ESP_OK) {
+        esp_event_msg_t tx_msg = { .event_id = HAL_L2CAP_EVENT_TX_COMPLETE, .status = 0 };
+        xQueueSend(s_event_queue, &tx_msg, 0);
+        return 0;
     }
-    return (ret == ESP_OK) ? 0 : (ret == ESP_ERR_NO_MEM ? 1 : -1);
+    return (ret == ESP_ERR_NO_MEM) ? 1 : -1;
 }
 
 int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
@@ -390,18 +376,15 @@ int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
         }
     }
     
-    portENTER_CRITICAL(&s_state_spinlock);
-    s_tx_busy = true; /* Optimistic lock */
-    portEXIT_CRITICAL(&s_state_spinlock);
-    
-    esp_err_t err = esp_bt_l2cap_vfs_send(handle, s_tx_aligned_buf, total_len);
+    esp_err_t err = esp_bt_l2cap_data_write(handle, s_tx_aligned_buf, total_len);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "L2CAP write failed: %d", err);
-        portENTER_CRITICAL(&s_state_spinlock);
-        s_tx_busy = false; /* Rollback */
-        portEXIT_CRITICAL(&s_state_spinlock);
-        return -1;
+        return (err == ESP_ERR_NO_MEM) ? 1 : -1;
     }
+    
+    esp_event_msg_t tx_msg = { .event_id = HAL_L2CAP_EVENT_TX_COMPLETE, .status = 0 };
+    xQueueSend(s_event_queue, &tx_msg, 0);
+    
     return 0;
 }
 

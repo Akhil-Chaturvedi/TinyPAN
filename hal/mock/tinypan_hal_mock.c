@@ -46,6 +46,7 @@ static uint32_t s_mock_tick_ms = 0;
 static uint8_t s_tx_history_data[MOCK_TX_HISTORY_LEN][1500] = {0};
 static uint16_t s_tx_history_len[MOCK_TX_HISTORY_LEN] = {0};
 static int s_tx_history_head = 0;
+static bool s_tx_complete_pending = false;
 
 /* ============================================================================
  * Mock Control API (for testing)
@@ -173,7 +174,13 @@ void hal_bt_deinit(void) {
 }
 
 void hal_bt_poll(void) {
-    /* Mock HAL is synchronous, nothing to poll in background */
+    /* Deliver any deferred TX_COMPLETE events from the previous send call */
+    if (s_tx_complete_pending) {
+        s_tx_complete_pending = false;
+        if (s_event_callback) {
+            s_event_callback(HAL_L2CAP_EVENT_TX_COMPLETE, 0, s_event_callback_user_data);
+        }
+    }
 }
 
 int hal_bt_l2cap_connect(const uint8_t remote_addr[HAL_BD_ADDR_LEN], uint16_t psm, uint16_t local_mtu) {
@@ -227,6 +234,8 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
     }
     
     TINYPAN_LOG_DEBUG("[MOCK] TX: %s", hex);
+    
+    s_tx_complete_pending = true;
     
     return 0; /* Success */
 }
@@ -288,6 +297,8 @@ int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
     }
     
     TINYPAN_LOG_DEBUG("[MOCK] TX: %s", hex);
+    
+    s_tx_complete_pending = true;
     
     return 0;
 }

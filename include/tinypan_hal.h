@@ -40,7 +40,12 @@ typedef enum {
     HAL_L2CAP_EVENT_CONNECTED = 1,      /**< L2CAP channel opened successfully */
     HAL_L2CAP_EVENT_DISCONNECTED,       /**< L2CAP channel closed */
     HAL_L2CAP_EVENT_CONNECT_FAILED,     /**< L2CAP connection attempt failed */
-    HAL_L2CAP_EVENT_CAN_SEND_NOW        /**< Ready to send data */
+    HAL_L2CAP_EVENT_CAN_SEND_NOW,       /**< Radio is ready to accept the next frame */
+    HAL_L2CAP_EVENT_TX_COMPLETE         /**< Previous send call's data has been consumed by the radio.
+                                             The transport layer uses this to release pbuf references.
+                                             Must be fired once per successful send call.
+                                             On HALs that copy into an internal buffer, fire immediately.
+                                             On HALs that use DMA, fire from the TX-done ISR/callback. */
 } hal_l2cap_event_t;
 
 /* ============================================================================
@@ -120,11 +125,18 @@ void hal_bt_l2cap_disconnect(void);
 /**
  * @brief Send data over the L2CAP channel
  *
- * Sends a single contiguous buffer over the Bluetooth channel.
+ * Sends a single contiguous buffer over the Bluetooth channel. Used primarily
+ * for BNEP control packets and SLIP-mode data.
+ *
+ * On success (return 0), the HAL must fire HAL_L2CAP_EVENT_TX_COMPLETE via
+ * the event callback once the data has been consumed by the radio or copied
+ * into an internal send buffer. Until that event is received, the caller
+ * must not reuse the buffer (though for SLIP mode, the HAL typically copies
+ * internally so the buffer is safe to reuse immediately).
  *
  * @param data         Pointer to the frame
  * @param len          Total length of the frame
- * @return 0 on success, negative error code on failure, positive if busy
+ * @return 0 on success, negative error code on failure, 1 if radio is busy/congested
  */
 int hal_bt_l2cap_send(const uint8_t* data, uint16_t len);
 
@@ -139,10 +151,16 @@ typedef struct {
 /**
  * @brief Send a scatter-gather array over the L2CAP channel
  *
- * This is the preferred way to send data to avoid redundant memory copies
- * when the payload is spread across multiple buffers.
- * The HAL implementation must handle potentially non-contiguous chains
- * (e.g., by copying into an internal aligned bounce buffer or using DMA).
+ * The preferred TX interface for BNEP mode. The iovec array describes
+ * a logical frame split across non-contiguous memory regions (e.g., a
+ * synthesized BNEP header in local storage and the original lwIP pbuf payload).
+ *
+ * The HAL may copy the segments into an internal aligned buffer (bounce buffer)
+ * or map them into hardware DMA descriptors. Either approach is valid, but the
+ * HAL must fire HAL_L2CAP_EVENT_TX_COMPLETE once the data is no longer needed.
+ *
+ * The iov pointers are valid only until TX_COMPLETE is received. The BNEP
+ * transport holds the pbuf reference alive across this window.
  *
  * @param iov          Array of I/O vectors
  * @param iov_count    Number of vectors in the array
