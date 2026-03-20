@@ -225,6 +225,26 @@ void hal_get_local_bd_addr(uint8_t addr[HAL_BD_ADDR_LEN]);
  */
 uint32_t hal_get_tick_ms(void);
 
+/**
+ * @brief Register a callback to explicitly wake the RTOS polling thread
+ * 
+ * @param callback  Function to call from RX/Event contexts to awake the thread
+ * @param user_data User data pointer
+ */
+void hal_bt_set_wakeup_callback(void (*callback)(void*), void* user_data);
+
+/**
+ * @brief Query dynamic HAL timeout constraints (e.g. backoff timers)
+ * @return Milliseconds until next mandatory poll, or 0xFFFFFFFF if none.
+ */
+uint32_t hal_bt_get_next_timeout_ms(void);
+
+/**
+ * @brief Get the negotiated Link MTU for chunking logic
+ * @return The operational MTU limit in bytes.
+ */
+uint16_t hal_bt_l2cap_get_mtu(void);
+
 
 #ifdef __cplusplus
 }

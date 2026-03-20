@@ -42,6 +42,9 @@ static void* s_recv_cb_data = NULL;
 static hal_l2cap_event_callback_t s_event_cb = NULL;
 static void* s_event_cb_data = NULL;
 
+static void (*s_wakeup_cb)(void*) = NULL;
+static void* s_wakeup_cb_data = NULL;
+
 static bool s_hal_initialized = false;
 /* Cross-task state: accessed by both the BTU callback task and the app task. 
  * Protected by s_state_spinlock (portENTER_CRITICAL) to ensure atomicity 
@@ -122,6 +125,7 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
                 event_msg.status = param->cl_init.status;
                 /* Non-critical: if this drops, supervisor times out and retries. */
                 xQueueSend(s_event_queue, &event_msg, 0);
+                if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
             }
             break;
 
@@ -138,6 +142,7 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
                  * but log the anomaly for diagnostics. */
                 ESP_LOGE(TAG, "Event queue full on DISCONNECTED; supervisor will timeout");
             }
+            if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
             break;
 
         case ESP_BT_L2CAP_DATA_IND_EVT:
@@ -154,6 +159,8 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
                     /* Memory Barrier: Ensure data is written before updating head */
                     portMEMORY_BARRIER();
                     s_rx_ring_head = next_head;
+
+                    if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
                 } else {
                     ESP_LOGW(TAG, "RX ring full, dropped inbound L2CAP frame");
                 }
@@ -175,6 +182,7 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
                 /* Non-critical: loss of a CAN_SEND_NOW event is recovered by the
                  * next transmit attempt calling hal_bt_l2cap_request_can_send_now(). */
                 xQueueSend(s_event_queue, &event_msg, 0);
+                if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
             }
             break;
 
@@ -284,6 +292,11 @@ void hal_bt_l2cap_register_event_callback(hal_l2cap_event_callback_t cb, void* u
     s_event_cb_data = user_data;
 }
 
+void hal_bt_set_wakeup_callback(void (*cb)(void*), void* user_data) {
+    s_wakeup_cb = cb;
+    s_wakeup_cb_data = user_data;
+}
+
 bool hal_bt_l2cap_is_connected(void) {
     bool connected;
     portENTER_CRITICAL(&s_state_spinlock);
@@ -311,6 +324,7 @@ void hal_bt_l2cap_request_can_send_now(void) {
         msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
         msg.status = 0;
         xQueueSend(s_event_queue, &msg, 0);
+        if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
     }
 }
 
@@ -391,8 +405,11 @@ int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
         return -1;
     }
     
-    esp_event_msg_t tx_msg = { .event_id = HAL_L2CAP_EVENT_TX_COMPLETE, .status = 0 };
-    xQueueSend(s_event_queue, &tx_msg, 0);
+    /* QA-16: Execute TX_COMPLETE synchronously in app thread context to prevent
+     * RTOS queue dropping/deadlocking BNEP engine logic */
+    if (s_event_cb) {
+        s_event_cb(HAL_L2CAP_EVENT_TX_COMPLETE, 0, s_event_cb_data);
+    }
     
     return 0;
 }
@@ -408,4 +425,12 @@ void hal_get_local_bd_addr(uint8_t addr[HAL_BD_ADDR_LEN]) {
 
 uint32_t hal_get_tick_ms(void) {
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+uint32_t hal_bt_get_next_timeout_ms(void) {
+    return 0xFFFFFFFF;
+}
+
+uint16_t hal_bt_l2cap_get_mtu(void) {
+    return TINYPAN_L2CAP_MTU;
 }

@@ -54,6 +54,11 @@ static void slip_transport_on_disconnected(void) {
 #endif
 }
 
+#if TINYPAN_ENABLE_LWIP
+/* Hardened configuration guard: prevent integer underflow bombs in chunking loop */
+_Static_assert(TINYPAN_SLIP_CHUNK_SIZE >= 4, "TINYPAN_SLIP_CHUNK_SIZE must be at least 4 bytes");
+#endif
+
 static void slip_transport_retry_setup(void) {
     /* SLIP has no setup phase, this is a no-op */
 }
@@ -301,12 +306,19 @@ void slip_transport_drain_tx_queue(void) {
         }
 
         if (s_slip_tx_state == 1) {
-            while (s_slip_tx_current != NULL && chunk_idx < sizeof(s_slip_chunk_buf) - 2) {
+            /* BLE-compliant Dynamic MTU: The operational chunk size is the minimum of
+     * our static staging buffer and the current HAL-negotiated link MTU.
+     * This ensures TinyPAN remains compatible with iOS (MTU 185) and Android 
+     * (MTU 247) without requiring compile-time branching. */
+    uint16_t hal_mtu = hal_bt_l2cap_get_mtu();
+    uint16_t max_chunk = (hal_mtu < sizeof(s_slip_chunk_buf)) ? hal_mtu : sizeof(s_slip_chunk_buf);
+    
+    while (s_slip_tx_current != NULL && chunk_idx < max_chunk - 2) {
                 uint8_t* payload = (uint8_t*)s_slip_tx_current->payload;
-                while (s_slip_tx_offset < s_slip_tx_current->len && chunk_idx < sizeof(s_slip_chunk_buf) - 2) {
+                while (s_slip_tx_offset < s_slip_tx_current->len && chunk_idx < max_chunk - 2) {
                     /* Bulk Copy Optimization: Use memchr to find next escape char */
                     uint16_t rem_payload = s_slip_tx_current->len - s_slip_tx_offset;
-                    uint16_t rem_chunk = (sizeof(s_slip_chunk_buf) - 2) - chunk_idx;
+                    uint16_t rem_chunk = (max_chunk - 2) - chunk_idx;
                     uint16_t scan_len = (rem_payload < rem_chunk) ? rem_payload : rem_chunk;
                     
                     const uint8_t* next_esc = memchr(payload + s_slip_tx_offset, SLIP_END, scan_len);
@@ -348,7 +360,7 @@ void slip_transport_drain_tx_queue(void) {
         }
 
         bool frame_done = false;
-        if (s_slip_tx_state == 2 && chunk_idx < sizeof(s_slip_chunk_buf)) {
+        if (s_slip_tx_state == 2 && chunk_idx < max_chunk) {
             s_slip_chunk_buf[chunk_idx++] = SLIP_END;
             frame_done = true;
         }

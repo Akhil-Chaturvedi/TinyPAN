@@ -38,6 +38,9 @@ static void* s_recv_callback_user_data = NULL;
 static hal_l2cap_event_callback_t s_event_callback = NULL;
 static void* s_event_callback_user_data = NULL;
 
+static void (*s_wakeup_cb)(void*) = NULL;
+static void* s_wakeup_cb_data = NULL;
+
 static bool s_use_mock_time = false;
 static uint32_t s_mock_tick_ms = 0;
 
@@ -78,6 +81,8 @@ void mock_hal_simulate_connect_success(void) {
     if (s_event_callback) {
         s_event_callback(HAL_L2CAP_EVENT_CONNECTED, 0, s_event_callback_user_data);
     }
+    
+    if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
 }
 
 /**
@@ -92,6 +97,8 @@ void mock_hal_simulate_connect_failure(int status) {
     if (s_event_callback) {
         s_event_callback(HAL_L2CAP_EVENT_CONNECT_FAILED, status, s_event_callback_user_data);
     }
+    
+    if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
 }
 
 /**
@@ -106,6 +113,8 @@ void mock_hal_simulate_disconnect(void) {
     if (s_event_callback) {
         s_event_callback(HAL_L2CAP_EVENT_DISCONNECTED, 0, s_event_callback_user_data);
     }
+    
+    if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
 }
 
 /**
@@ -143,6 +152,7 @@ void mock_hal_set_can_send(bool can_send) {
     if (can_send && s_event_callback) {
         s_event_callback(HAL_L2CAP_EVENT_CAN_SEND_NOW, 0, s_event_callback_user_data);
     }
+    if (can_send && s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
 }
 
 /**
@@ -247,6 +257,7 @@ void hal_bt_l2cap_request_can_send_now(void) {
     if (s_can_send && s_event_callback) {
         s_event_callback(HAL_L2CAP_EVENT_CAN_SEND_NOW, 0, s_event_callback_user_data);
     }
+    if (s_can_send && s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
 }
 
 int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
@@ -311,6 +322,11 @@ void hal_bt_l2cap_register_event_callback(hal_l2cap_event_callback_t callback, v
     s_event_callback_user_data = user_data;
 }
 
+void hal_bt_set_wakeup_callback(void (*callback)(void*), void* user_data) {
+    s_wakeup_cb = callback;
+    s_wakeup_cb_data = user_data;
+}
+
 void hal_get_local_bd_addr(uint8_t addr[HAL_BD_ADDR_LEN]) {
     memcpy(addr, s_local_addr, HAL_BD_ADDR_LEN);
 }
@@ -326,6 +342,14 @@ uint32_t hal_get_tick_ms(void) {
     gettimeofday(&tv, NULL);
     return (uint32_t)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
 #endif
+}
+
+uint32_t hal_bt_get_next_timeout_ms(void) {
+    return 0xFFFFFFFF;
+}
+
+uint16_t hal_bt_l2cap_get_mtu(void) {
+    return 1500;
 }
 
 const uint8_t* mock_hal_get_last_tx_data(void) {

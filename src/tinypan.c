@@ -146,6 +146,10 @@ void tinypan_set_event_callback(tinypan_event_callback_t callback, void* user_da
     s_event_callback_user_data = user_data;
 }
 
+void tinypan_set_wakeup_callback(void (*callback)(void*), void* user_data) {
+    hal_bt_set_wakeup_callback(callback, user_data);
+}
+
 tinypan_error_t tinypan_start(void) {
     if (!s_initialized) {
         TINYPAN_LOG_ERROR("tinypan_start: Not initialized");
@@ -234,6 +238,12 @@ uint32_t tinypan_get_next_timeout_ms(void) {
     uint32_t sup_sleep = supervisor_get_next_timeout_ms();
     if (sup_sleep < sleep_ms) {
         sleep_ms = sup_sleep;
+    }
+
+    /* Consult the HAL for internal backoff requirements */
+    uint32_t hal_sleep = hal_bt_get_next_timeout_ms();
+    if (hal_sleep < sleep_ms) {
+        sleep_ms = hal_sleep;
     }
 
     return sleep_ms;

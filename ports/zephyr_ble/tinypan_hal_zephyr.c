@@ -43,6 +43,9 @@ static void* s_event_cb_data = NULL;
 static bool s_hal_initialized = false;
 static struct bt_conn *s_current_conn = NULL;
 
+static void (*s_wakeup_cb)(void*) = NULL;
+static void* s_wakeup_cb_data = NULL;
+
 /* Message definitions for Zephyr k_msgq */
 struct z_event_msg {
     int event_id;
@@ -131,6 +134,8 @@ static void connected(struct bt_conn *conn, uint8_t err) {
         bt_conn_unref(s_current_conn);
         s_current_conn = NULL;
     }
+
+    if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason) {
@@ -149,6 +154,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
          * The supervisor's state timeout will eventually recover. */
         printk("Event queue full on DISCONNECTED; supervisor will timeout\n");
     }
+
+    if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -163,6 +170,8 @@ static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
     if (wrote < len) {
         printk("Zephyr RX ringbuf full, dropped %lu bytes\n", (unsigned long)(len - wrote));
     }
+
+    if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
 }
 
 static struct bt_nus_cb nus_cb = {
@@ -231,6 +240,11 @@ void hal_bt_l2cap_register_event_callback(hal_l2cap_event_callback_t cb, void* u
     s_event_cb_data = user_data;
 }
 
+void hal_bt_set_wakeup_callback(void (*cb)(void*), void* user_data) {
+    s_wakeup_cb = cb;
+    s_wakeup_cb_data = user_data;
+}
+
 bool hal_bt_l2cap_can_send(void) {
     return (s_current_conn != NULL);
 }
@@ -280,4 +294,20 @@ void hal_get_local_bd_addr(uint8_t addr[HAL_BD_ADDR_LEN]) {
 
 uint32_t hal_get_tick_ms(void) {
     return (uint32_t)k_uptime_get();
+}
+
+uint32_t hal_bt_get_next_timeout_ms(void) {
+    if (s_tx_notify_pending) {
+        uint32_t now = k_uptime_get();
+        if (now < s_tx_retry_time) {
+            return (s_tx_retry_time - now);
+        }
+        return 0; /* Poll immediately */
+    }
+    return 0xFFFFFFFF;
+}
+
+uint16_t hal_bt_l2cap_get_mtu(void) {
+    if (!s_current_conn) return 23; /* GATT Base MTU */
+    return bt_gatt_get_mtu(s_current_conn) - 3; /* GATT Overhead */
 }

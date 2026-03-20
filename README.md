@@ -26,7 +26,7 @@ The BNEP transport (`tinypan_bnep_transport.c`) implements zero-copy for IP payl
 The `pbuf` is held in-queue until the HAL fires `HAL_L2CAP_EVENT_TX_COMPLETE`, at which point `pbuf_free` is called. Only one frame is in-flight at a time. HAL implementations that copy data internally (e.g., Bluedroid's `esp_bt_l2cap_data_write`) may fire `TX_COMPLETE` immediately; HAL implementations that perform true DMA must fire it only after the hardware signals completion.
 
 ### SLIP Encoder
-The SLIP transport encodes outgoing `pbuf` chains on the fly into a configurable staging buffer (default 247 bytes, set via `TINYPAN_SLIP_CHUNK_SIZE`)—a size optimized for modern BLE 4.2+ Data Length Extension (DLE) MTUs. Contiguous runs of non-escape bytes are copied in bulk; only bytes requiring escaping (`0xC0`, `0xDB`) are handled individually. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is acknowledged by the HAL.
+The SLIP transport encodes outgoing `pbuf` chains on the fly into a configurable staging buffer (`TINYPAN_SLIP_CHUNK_SIZE`). At runtime, the transport queries `hal_bt_l2cap_get_mtu()` to dynamically align chunks with the link-layer MTU (e.g., 185 bytes for iOS, 247 bytes for Android), preventing fragmentation at the BLE stack level. Contiguous runs of non-escape bytes are copied in bulk; only bytes requiring escaping (`0xC0`, `0xDB`) are handled individually. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is acknowledged by the HAL.
 
 ### SLIP Decoder
 Incoming SLIP bytes are accumulated directly into pool-allocated (`PBUF_POOL`) segments via a streaming FSM. A single incoming frame is bounded to 2 pool segments (~3 KB). If a frame exceeds this limit, the FSM enters a `seeking_end` state and pauses pool allocations until a `SLIP_END` delimiter is reached, preventing memory-pool thrashing during error recovery. When a valid frame is completed, the last segment is trimmed with `pbuf_realloc` to the exact data length.
@@ -52,7 +52,9 @@ Integration with a specific Bluetooth stack requires implementing the `tinypan_h
 ### Threading and Reentrancy
 TinyPAN is non-reentrant. All library interactions -- including API calls and HAL callbacks -- must be synchronized to the same thread context as `tinypan_process()`. The provided reference ports (ESP32, Zephyr) bridge interrupt/callback-context events to the application thread using static ring buffers.
 
-`tinypan_get_next_timeout_ms()` returns the maximum safe sleep duration based on active protocol timers. On RTOS platforms, the HAL should use native signaling primitives (semaphores, event groups) to wake the processing thread when new data arrives from the radio.
+`tinypan_get_next_timeout_ms()` returns the maximum safe sleep duration based on active protocol timers and HAL-internal polling requirements (e.g. congestion backoffs). 
+
+**Latency Elimination:** To avoid the "500ms ping" floor caused by lwIP/BNEP timer resolutions, the application should register a wakeup hook via `tinypan_set_wakeup_callback()`. The HAL must invoke this callback from Bluetooth ISRs or event tasks to immediately abort the application's sleep state when new data arrives.
 
 ## Protocol Implementation Notes
 

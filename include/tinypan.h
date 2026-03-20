@@ -142,6 +142,14 @@ tinypan_error_t tinypan_init(const tinypan_config_t* config);
 void tinypan_set_event_callback(tinypan_event_callback_t callback, void* user_data);
 
 /**
+ * @brief Register a generic callback to wake the application's processing thread.
+ * 
+ * Invoked by the HAL from ISRs or event hooks to immediately abort sleep,
+ * radically reducing network latency.
+ */
+void tinypan_set_wakeup_callback(void (*callback)(void*), void* user_data);
+
+/**
  * @brief Start connection process
  * 
  * Begins the connection sequence to the configured NAP device.
