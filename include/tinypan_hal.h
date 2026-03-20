@@ -44,8 +44,15 @@ typedef enum {
     HAL_L2CAP_EVENT_TX_COMPLETE         /**< Previous send_iovec call's data has been consumed by the radio.
                                              The transport layer uses this to release pbuf references.
                                              Must be fired once per successful send_iovec call.
-                                             On HALs that copy into an internal buffer, fire immediately.
-                                             On HALs that use DMA, fire from the TX-done ISR/callback.
+
+                                             **STACK SAFETY WARNING:** To prevent deep stack recursion and
+                                             overflow panics, the HAL MUST NOT fire this event immediately
+                                             within the call stack of hal_bt_l2cap_send_iovec(). Instead,
+                                             the HAL should set a flag and fire the event during the 
+                                             subsequent hal_bt_poll() execution in the application task.
+
+                                             On HALs that use DMA, fire from the TX-done ISR or bridge
+                                             via a task-safe queue to the next poll cycle.
                                              NOTE: Do not fire for contiguous hal_bt_l2cap_send() calls. */
 } hal_l2cap_event_t;
 

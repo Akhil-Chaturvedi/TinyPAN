@@ -240,6 +240,7 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                     s_slip_rx_curr_offset = 0;
                     s_slip_rx_total_offset = 0;
                     s_slip_rx_seg_count = 0;
+                    s_slip_rx_escape = false; /* QA-17: Fix state poisoning */
                     s_slip_rx_seeking_end = true;
                 }
             } else if (c == SLIP_ESC) {

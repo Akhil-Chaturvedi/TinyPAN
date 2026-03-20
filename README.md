@@ -46,7 +46,7 @@ Integration with a specific Bluetooth stack requires implementing the `tinypan_h
 2. **`hal_bt_l2cap_send()`**: Transmit a contiguous buffer. Used for SLIP streaming and BNEP control packets.
 3. **`hal_bt_l2cap_connect()`**: Initiate an L2CAP channel to a remote BD_ADDR.
 4. **`hal_get_tick_ms()`**: Provide a monotonic millisecond counter. Wrap-around is handled correctly.
-5. **TX Lifecycle**: After a successful `send_iovec` call returns `0` (used by BNEP zero-copy DMA), the HAL must fire `HAL_L2CAP_EVENT_TX_COMPLETE` (via the event callback) once the radio is done with the submitted buffer. For HALs that copy data internally, this can be fired immediately (via `hal_bt_poll`). For HALs that submit DMA descriptors, it must be deferred until the hardware completion interrupt. **Note:** Contiguous `send` calls (used in SLIP mode) rely purely on synchronous return backpressure and must NOT fire this event to avoid event queue DoS.
+5. **TX Lifecycle**: After a successful `send_iovec` call returns `0` (used by BNEP zero-copy DMA), the HAL must fire `HAL_L2CAP_EVENT_TX_COMPLETE` (via the event callback) once the radio is done with the submitted buffer. **Stack Safety:** To prevent deep recursion panics, the HAL must NOT fire this synchronously within the send context; instead, it must defer the callback to the next `hal_bt_poll()` cycle. **Note:** Contiguous `send` calls (used in SLIP mode) rely purely on synchronous return backpressure and must NOT fire this event to avoid event queue DoS.
 6. **RX Integration**: The HAL must invoke the registered `hal_l2cap_recv_callback_t` from the polling context or bridge incoming data through a thread-safe queue/ring buffer.
 
 ### Threading and Reentrancy
@@ -62,7 +62,7 @@ TinyPAN is non-reentrant. All library interactions -- including API calls and HA
 - **Header Compression:** Dynamically enabled for PANU-to-NAP flows to minimize radio-on time and latency.
 - **BNEP Control Packets:** Extension headers are parsed and skipped before control type dispatch.
 - **Multicast Filtering:** Automatically sent after BNEP setup before DHCP.
-- **DHCP:** Managed by lwIP's DHCP client. The netif stack is reset on disconnect; `dhcp_stop` is called before `dhcp_start` on reconnection to force a fresh lease discovery.
+- **DHCP Lifecycle:** Managed by lwIP's DHCP client. The netif stack is reset on disconnect; TinyPAN monitors the IP address state in the netif callback to handle lease expiration or renewal failures, ensuring the library state machine accurately reflects the network reachability.
 
 ## License
 

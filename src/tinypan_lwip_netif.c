@@ -155,6 +155,9 @@ static void tinypan_netif_status_callback(struct netif* netif) {
             
             /* Notify the main TinyPAN module */
             tinypan_internal_set_ip(ip->addr, mask->addr, gw->addr, 0);
+        } else {
+            /* QA-17: Fix DHCP split-brain - clear IP if address is lost/expired */
+            tinypan_internal_clear_ip();
         }
     }
 }

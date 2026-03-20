@@ -53,6 +53,7 @@ static portMUX_TYPE s_state_spinlock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_is_connected = false;
 static uint32_t s_l2cap_handle = 0;
 static bool s_tx_busy = false;
+static bool s_tx_complete_pending = false;
 
 /* Used to align and pack unaligned or non-contiguous data for DMA safety */
 static uint8_t s_tx_aligned_buf[TINYPAN_L2CAP_MTU + 32];
@@ -206,6 +207,14 @@ void hal_bt_poll(void) {
     while (xQueueReceive(s_event_queue, &evt_msg, 0) == pdTRUE) {
         if (s_event_cb) {
             s_event_cb((hal_l2cap_event_t)evt_msg.event_id, evt_msg.status, s_event_cb_data);
+        }
+    }
+
+    /* 1b. Fire deferred completion events (Breaks recursion loop from app thread) */
+    if (s_tx_complete_pending) {
+        s_tx_complete_pending = false;
+        if (s_event_cb) {
+            s_event_cb(HAL_L2CAP_EVENT_TX_COMPLETE, 0, s_event_cb_data);
         }
     }
 
@@ -405,11 +414,9 @@ int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
         return -1;
     }
     
-    /* QA-16: Execute TX_COMPLETE synchronously in app thread context to prevent
-     * RTOS queue dropping/deadlocking BNEP engine logic */
-    if (s_event_cb) {
-        s_event_cb(HAL_L2CAP_EVENT_TX_COMPLETE, 0, s_event_cb_data);
-    }
+    /* QA-17: Defer completion to hal_bt_poll to prevent deep stack recursion
+     * if the transport immediately tries to send the next packet. */
+    s_tx_complete_pending = true;
     
     return 0;
 }
