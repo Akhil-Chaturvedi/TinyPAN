@@ -1,5 +1,25 @@
 # TinyPAN CMake Build
+#
+# !! HOST-MACHINE UNIT TEST HARNESS ONLY !!
+#
+# This CMakeLists.txt is used to build and run TinyPAN's test suite on a
+# standard Linux/macOS/Windows host. It fetches a standalone copy of lwIP
+# purely to compile and test the protocol logic.
+#
+# DO NOT use this build file to integrate TinyPAN into a target RTOS project:
+#
+#  - ESP-IDF: Use `idf_component_register(...)` with TINYPAN_ENABLE_LWIP=0.
+#             The ESP-IDF framework already links its own lwIP. Using this
+#             CMake alongside it will produce duplicate symbol linker errors.
+#
+#  - Zephyr: Use `zephyr_library_named(tinypan)` in a Zephyr module with
+#            TINYPAN_ENABLE_LWIP=0. Zephyr manages lwIP through its own Kconfig
+#            and CMake infrastructure.
+#
 cmake_minimum_required(VERSION 3.12)
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
 project(TinyPAN VERSION 0.1.0 LANGUAGES C)
 
 # C Standard
@@ -31,9 +51,15 @@ if(TINYPAN_ENABLE_LWIP)
     FetchContent_Declare(
         lwip
         URL https://github.com/lwip-tcpip/lwip/archive/refs/tags/STABLE-2_1_3_RELEASE.tar.gz
-        SOURCE_SUBDIR "dummy_folder_to_skip_cmakelists"
+        DOWNLOAD_EXTRACT_TIMESTAMP true
     )
-    FetchContent_MakeAvailable(lwip)
+    
+    # Manually populate so we can use the sources without adding lwIP's own
+    # CMake project (which checks for Doxygen and causes harmless warnings).
+    FetchContent_GetProperties(lwip)
+    if(NOT lwip_POPULATED)
+        FetchContent_Populate(lwip)
+    endif()
 
     # Define minimal lwIP library
     # Load lwIP's official source lists to avoid brittle hardcoding

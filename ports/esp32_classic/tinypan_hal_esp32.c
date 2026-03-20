@@ -51,7 +51,17 @@ static bool s_tx_busy = false;
 static uint8_t s_tx_aligned_buf[TINYPAN_L2CAP_MTU + 32];
 
 /* Static RX ring buffer: avoids malloc/free in the BT callback context,
- * preventing heap fragmentation on ESP32's split DRAM architecture. */
+ * preventing heap fragmentation on ESP32's split DRAM architecture.
+ *
+ * Static RAM cost: TINYPAN_ESP_RX_RING_SLOTS * TINYPAN_ESP_RX_SLOT_SIZE bytes.
+ * At default values (4 slots, TINYPAN_L2CAP_MTU+16 = 1707 bytes each) this is
+ * approximately 6.8 KB of BSS. Override either macro before including this file
+ * to reduce footprint for applications where the network layer can tolerate
+ * a smaller slot count or smaller maximum frame size:
+ *
+ *   #define TINYPAN_ESP_RX_RING_SLOTS  2    // 2 frames in-flight: ~3.4 KB
+ *   #define TINYPAN_ESP_RX_SLOT_SIZE   512  // Smaller frames only: ~1 KB
+ */
 #ifndef TINYPAN_ESP_RX_RING_SLOTS
 #define TINYPAN_ESP_RX_RING_SLOTS   4
 #endif
@@ -89,10 +99,17 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
                 s_is_connected = true;
                 s_tx_busy = false;
                 event_msg.event_id = HAL_L2CAP_EVENT_CONNECTED;
-                xQueueSend(s_event_queue, &event_msg, 0);
+                if (xQueueSend(s_event_queue, &event_msg, 0) != pdTRUE) {
+                    /* Queue full: the supervisor cannot learn of this connection.
+                     * Force-close the radio channel to restore a clean state. */
+                    ESP_LOGE(TAG, "Event queue full on CONNECTED; force-closing channel");
+                    esp_bt_l2cap_close(s_l2cap_handle);
+                    s_is_connected = false;
+                }
             } else {
                 event_msg.event_id = HAL_L2CAP_EVENT_CONNECT_FAILED;
                 event_msg.status = param->cl_init.status;
+                /* Non-critical: if this drops, supervisor times out and retries. */
                 xQueueSend(s_event_queue, &event_msg, 0);
             }
             break;
@@ -100,7 +117,12 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
         case ESP_BT_L2CAP_CLOSE_EVT:
             s_is_connected = false;
             event_msg.event_id = HAL_L2CAP_EVENT_DISCONNECTED;
-            xQueueSend(s_event_queue, &event_msg, 0);
+            if (xQueueSend(s_event_queue, &event_msg, 0) != pdTRUE) {
+                /* Queue full: the supervisor cannot learn of this disconnect.
+                 * The supervision timeout in the supervisor will eventually recover,
+                 * but log the anomaly for diagnostics. */
+                ESP_LOGE(TAG, "Event queue full on DISCONNECTED; supervisor will timeout");
+            }
             break;
 
         case ESP_BT_L2CAP_DATA_IND_EVT:
@@ -131,6 +153,8 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
                 s_tx_busy = false;
                 ESP_LOGD(TAG, "L2CAP Controller Uncongested");
                 event_msg.event_id = HAL_L2CAP_EVENT_CAN_SEND_NOW;
+                /* Non-critical: loss of a CAN_SEND_NOW event is recovered by the
+                 * next transmit attempt calling hal_bt_l2cap_request_can_send_now(). */
                 xQueueSend(s_event_queue, &event_msg, 0);
             }
             break;

@@ -150,7 +150,14 @@ static void connected(struct bt_conn *conn, uint8_t err) {
     struct z_event_msg msg;
     msg.event_id = HAL_L2CAP_EVENT_CONNECTED;
     msg.status = 0;
-    k_msgq_put(&s_zephyr_event_q, &msg, K_NO_WAIT);
+    if (k_msgq_put(&s_zephyr_event_q, &msg, K_NO_WAIT) != 0) {
+        /* Queue full: supervisor cannot learn of this connection.
+         * Force-disconnect to restore a clean state. */
+        printk("Event queue full on CONNECTED; force-disconnecting\n");
+        bt_conn_disconnect(s_current_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+        bt_conn_unref(s_current_conn);
+        s_current_conn = NULL;
+    }
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason) {
@@ -164,7 +171,11 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
     struct z_event_msg msg;
     msg.event_id = HAL_L2CAP_EVENT_DISCONNECTED;
     msg.status = reason;
-    k_msgq_put(&s_zephyr_event_q, &msg, K_NO_WAIT);
+    if (k_msgq_put(&s_zephyr_event_q, &msg, K_NO_WAIT) != 0) {
+        /* Queue full: supervisor cannot learn of this disconnect.
+         * The supervisor's state timeout will eventually recover. */
+        printk("Event queue full on DISCONNECTED; supervisor will timeout\n");
+    }
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
