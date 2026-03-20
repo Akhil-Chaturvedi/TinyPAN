@@ -318,11 +318,11 @@ void supervisor_on_l2cap_event(int event, int status) {
                     set_state(TINYPAN_STATE_BNEP_SETUP);
                     s_setup_retries = 0;
                 } else {
-                    set_state(TINYPAN_STATE_DHCP);
+                    /* QA-20: SLIP (Raw IP) does not support DHCP. 
+                     * Transition directly to ONLINE to prevent timeout suicide loops. */
+                    set_state(TINYPAN_STATE_ONLINE);
 #if TINYPAN_ENABLE_LWIP
-                    /* For setup-less transports (SLIP), link is logically UP immediately */
                     tinypan_netif_set_link(true);
-                    tinypan_netif_start_dhcp();
 #endif
                 }
             }

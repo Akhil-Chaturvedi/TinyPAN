@@ -46,8 +46,8 @@ typedef enum {
     TINYPAN_STATE_CONNECTING,       /**< L2CAP connection in progress */
     TINYPAN_STATE_BNEP_SETUP,       /**< BNEP setup handshake in progress */
     TINYPAN_STATE_BNEP_FILTER_WAIT, /**< Waiting for BNEP multicast filter response */
-    TINYPAN_STATE_DHCP,             /**< Transport negotiated, DHCP in progress */
-    TINYPAN_STATE_ONLINE,           /**< IP acquired, data transfer ready */
+    TINYPAN_STATE_DHCP,             /**< BNEP negotiated, DHCP in progress (BNEP mode only) */
+    TINYPAN_STATE_ONLINE,           /**< Transport ready for data transfer */
     TINYPAN_STATE_STALLED,          /**< Reserved, not implemented */
     TINYPAN_STATE_RECONNECTING,     /**< Connection lost, attempting reconnect */
     TINYPAN_STATE_ERROR             /**< Max reconnect attempts exhausted */

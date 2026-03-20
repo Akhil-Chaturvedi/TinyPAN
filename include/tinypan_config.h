@@ -92,7 +92,7 @@
 #endif
 
 /**
- * Timeout waiting for DHCP to complete.
+ * Timeout waiting for DHCP to complete (BNEP mode only).
  */
 #ifndef TINYPAN_DHCP_TIMEOUT_MS
 #define TINYPAN_DHCP_TIMEOUT_MS             30000
