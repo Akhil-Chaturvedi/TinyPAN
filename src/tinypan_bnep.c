@@ -46,7 +46,7 @@ static bnep_filter_response_callback_t s_filter_response_callback = NULL;
 static void* s_filter_response_callback_user_data = NULL;
 
 /** Control packet queue sizing */
-#define BNEP_CONTROL_QUEUE_LEN  4
+#define BNEP_CONTROL_QUEUE_LEN  10
 #define BNEP_CONTROL_MAX_LEN    64
 
 typedef struct {

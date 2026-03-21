@@ -125,6 +125,14 @@
 #endif
 
 /**
+ * Provide the lwIP sys_now() system timer hook in bare-metal (NO_SYS) environments.
+ * Set to 1 if your host application or broader project already implements sys_now() for lwIP.
+ */
+#ifndef TINYPAN_HOST_PROVIDES_SYS_NOW
+#define TINYPAN_HOST_PROVIDES_SYS_NOW       0
+#endif
+
+/**
  * Enable automatic reconnection on disconnect.
  */
 #ifndef TINYPAN_ENABLE_AUTO_RECONNECT
@@ -150,6 +158,27 @@
  */
 #ifndef TINYPAN_SLIP_CHUNK_SIZE
 #define TINYPAN_SLIP_CHUNK_SIZE             247
+#endif
+
+/**
+ * Auto-assign a static IP Address when the SLIP link connects.
+ * Since SLIP (Raw P2P) disables DHCP, this simplifies developer workflows by
+ * instantly configuring the lwIP routing table upon BLE tunnel establishment.
+ */
+#ifndef TINYPAN_SLIP_AUTO_IP
+#define TINYPAN_SLIP_AUTO_IP                1
+#endif
+
+#ifndef TINYPAN_SLIP_IP_ADDR
+#define TINYPAN_SLIP_IP_ADDR                TINYPAN_HTONL(0xC0A80402) /* 192.168.4.2 */
+#endif
+
+#ifndef TINYPAN_SLIP_NETMASK
+#define TINYPAN_SLIP_NETMASK                TINYPAN_HTONL(0xFFFFFF00) /* 255.255.255.0 */
+#endif
+
+#ifndef TINYPAN_SLIP_GATEWAY
+#define TINYPAN_SLIP_GATEWAY                TINYPAN_HTONL(0xC0A80401) /* 192.168.4.1 */
 #endif
 
 /**

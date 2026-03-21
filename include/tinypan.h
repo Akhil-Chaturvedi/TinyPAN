@@ -4,7 +4,7 @@
  * A portable PAN (Personal Area Network) client library for embedded systems.
  * Supports Bluetooth Classic (BNEP) and BLE (SLIP) operating modes.
  *
- * Copyright (c) 2024
+ * Copyright (c) 2026
  * Licensed under MIT License
  */
 

@@ -323,6 +323,15 @@ void supervisor_on_l2cap_event(int event, int status) {
                     set_state(TINYPAN_STATE_ONLINE);
 #if TINYPAN_ENABLE_LWIP
                     tinypan_netif_set_link(true);
+#if TINYPAN_USE_BLE_SLIP && TINYPAN_SLIP_AUTO_IP
+                    /* QA-22: Automatically assign a static IP since DHCP is bypassed. */
+                    TINYPAN_LOG_INFO("Assigning static IP for SLIP mode");
+                    tinypan_internal_set_ip(
+                        TINYPAN_SLIP_IP_ADDR, 
+                        TINYPAN_SLIP_NETMASK, 
+                        TINYPAN_SLIP_GATEWAY
+                    );
+#endif
 #endif
                 }
             }

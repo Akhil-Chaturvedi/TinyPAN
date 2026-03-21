@@ -10,8 +10,8 @@ TinyPAN supports two primary modes of operation, configured via `TINYPAN_USE_BLE
 Targeted at dual-mode Bluetooth controllers (e.g., original ESP32).
 
 - **Stack:** lwIP -> BNEP -> L2CAP (Classic)
-- **Compatibility:** Connects to the standard iOS/Android Personal Hotspot. No custom host-side software is required.
-- **Note:** ESP32-C3, ESP32-S3, and other BLE-only SoCs are NOT supported in this mode.
+- **Compatibility:** Standard iOS/Android Personal Hotspot. No custom host-side software required.
+- **Support:** ESP32-C3, ESP32-S3, and other BLE-only SoCs are not supported in this mode.
 
 ### Mode B: BLE SLIP Bridge
 Targeted at BLE-only or dual-mode controllers (e.g., nRF52, ESP32-C3, ESP32-S3).

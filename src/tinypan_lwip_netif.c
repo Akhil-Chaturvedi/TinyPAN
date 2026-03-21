@@ -429,12 +429,16 @@ void tinypan_netif_drain_tx_queue(void) {
     }
 }
 
+
+
 /* ============================================================================
  * lwIP System Time Provider
  * ============================================================================ */
 
 #if NO_SYS
+#if !TINYPAN_HOST_PROVIDES_SYS_NOW
 u32_t sys_now(void) {
     return hal_get_tick_ms();
 }
+#endif /* !TINYPAN_HOST_PROVIDES_SYS_NOW */
 #endif

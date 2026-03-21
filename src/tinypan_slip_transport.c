@@ -324,6 +324,15 @@ void slip_transport_drain_tx_queue(void) {
         goto drop_packet;
     }
     
+    /* QA-22: Worst-Case Expansion Note
+     * SLIP guarantees frame integrity by escaping 0xC0 (END) and 0xDB (ESC). 
+     * In the absolute worst case where an entire IP payload consists exclusively 
+     * of these bytes, the payload size will exactly double during encoding. 
+     * The `max_chunk - 2` logic below ensures the buffer will never overflow 
+     * even with peak back-to-back escapes, but integrators pushing maximum UDP 
+     * throughput should be aware that worst-case payloads will take twice as 
+     * long to transmit over the BLE link due to this expansion.
+     */
     while (s_slip_tx_current != NULL && chunk_idx < max_chunk - 2) {
                 uint8_t* payload = (uint8_t*)s_slip_tx_current->payload;
                 while (s_slip_tx_offset < s_slip_tx_current->len && chunk_idx < max_chunk - 2) {
