@@ -26,6 +26,8 @@ The BNEP transport (`tinypan_bnep_transport.c`) implements zero-copy for IP payl
 
 The `pbuf` and its associated `tinypan_iovec_t` descriptor array are held in the static transport job queue until the HAL fires `HAL_L2CAP_EVENT_TX_COMPLETE`. This ensures that even on true DMA implementations where the hardware reads descriptors asynchronously, the memory remains valid and immutable until the radio signals completion. Only one frame is in-flight at a time. 
 
+**Dead-Link Protection (Hardening):** In the event of an abrupt L2CAP disconnect where the peer fails to acknowledge in-flight packets, the BNEP transport forcibly reclaims and frees all queued pbufs during the cleanup phase. This prevents pool exhaustion and ensures immediate memory recovery for subsequent connection attempts.
+
 ### SLIP Encoder
 The SLIP transport encodes outgoing `pbuf` chains on the fly into a configurable staging buffer (`TINYPAN_SLIP_CHUNK_SIZE`). At runtime, the transport queries `hal_bt_l2cap_get_mtu()` and enforces a minimum safety boundary (4 bytes) to prevent integer underflows or buffer overflows on legacy or fluctuating links. Chunks are dynamically aligned with the link-layer MTU (e.g., 185 bytes for iOS, 247 bytes for Android), preventing fragmentation at the BLE stack level. Contiguous runs of non-escape bytes are copied in bulk; only bytes requiring escaping (`0xC0`, `0xDB`) are handled individually. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is acknowledged by the HAL.
 
@@ -60,7 +62,7 @@ TinyPAN is non-reentrant. All library interactions -- including API calls and HA
 
 `tinypan_get_next_timeout_ms()` returns the maximum safe sleep duration based on active protocol timers and HAL-internal polling requirements (e.g. congestion backoffs). 
 
-**Latency Elimination:** To avoid the "500ms ping" floor caused by lwIP/BNEP timer resolutions, the application should register a wakeup hook via `tinypan_set_wakeup_callback()`. The HAL must invoke this callback from Bluetooth ISRs or event tasks to immediately abort the application's sleep state when new data arrives.
+**Wakeup Optimization:** To minimize latency caused by protocol timer resolutions, the application should register a wakeup hook via `tinypan_set_wakeup_callback()`. The HAL must invoke this callback from Bluetooth ISRs or event tasks to immediately abort the application's sleep state when new data or event transitions occur.
 
 ## Protocol Implementation Notes
 
@@ -68,7 +70,8 @@ TinyPAN is non-reentrant. All library interactions -- including API calls and HA
 - **Header Compression:** Dynamically enabled for PANU-to-NAP flows to minimize radio-on time and latency.
 - **BNEP Control Packets:** Extension headers are parsed and skipped before control type dispatch.
 - **Multicast Filtering:** Automatically sent after BNEP setup before DHCP.
-- **DHCP Lifecycle:** Managed by lwIP's DHCP client. The netif stack is reset on disconnect; TinyPAN monitors the IP address state in the netif callback to handle lease expiration or renewal failures, ensuring the library state machine accurately reflects the network reachability.
+- **DHCP Lifecycle:** Managed by lwIP's DHCP client. TinyPAN implements a soft retry mechanism with exponential backoff (default: 3 attempts) for DHCP discovery timeouts before declaring a link failure. The netif stack is reset on disconnect; TinyPAN monitors the IP address state in the netif callback to handle lease expiration or renewal failures, ensuring the library state machine accurately reflects the network reachability.
+- **ESP32 Concurrency:** The reference HAL maintains thread safety on dual-core processors via hardware spinlocks (`portENTER_CRITICAL`) and atomic ring buffer head/tail management, ensuring consistent cross-task memory visibility between the Bluetooth stack and application threads.
 
 ## License
 

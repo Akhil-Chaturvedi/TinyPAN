@@ -104,7 +104,7 @@ typedef struct {
     struct pbuf* p;
     uint8_t hdr[15];
     uint8_t hdr_len;
-    tinypan_iovec_t iov[16]; /* QA-18: Must not be on stack for DMA safety */
+    tinypan_iovec_t iov[6]; /* Reduced from 16 to 6 to save RAM; 16-chain pbufs are invalid. */
     uint16_t iov_count;
     bool in_flight;
 } bnep_tx_job_t;
@@ -200,9 +200,11 @@ void bnep_transport_flush_tx_queue(void) {
     while (s_bnep_tx_head != s_bnep_tx_tail) {
         bnep_tx_job_t* job = &s_bnep_tx_queue[s_bnep_tx_head];
         
-        /* QA-21: Never free an in-flight packet. It is owned by the hardware 
-         * DMA controller. Let on_tx_complete clean it up. */
-        if (job->in_flight) {
+        /* Hardening: If the link is still connected, we MUST NOT free an 
+         * in-flight packet as the DMA controller may still be reading it.
+         * HOWEVER, if the link is dead, 'on_tx_complete' will never fire.
+         * Reclaim memory only if the HAL confirms the connection is gone. */
+        if (job->in_flight && hal_bt_l2cap_can_send()) {
             break;
         }
 
@@ -210,6 +212,7 @@ void bnep_transport_flush_tx_queue(void) {
             pbuf_free(job->p);
             job->p = NULL;
         }
+        job->in_flight = false;
         s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
     }
 }
@@ -243,21 +246,12 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
      * the BNEP header locally in the queue struct, and pass it directly into
      * iov[0] while the remaining pbuf segments map to iov[1..N]. */
 
-    uint8_t dst_addr[6], src_addr[6];
-    uint16_t ethertype;
-    
-#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
-    uint16_t eth_offset = ETH_PAD_SIZE;
-#else
-    uint16_t eth_offset = 0;
-#endif
-
-    /* Extract Ethernet header fields from the payload */
-    pbuf_copy_partial(p, dst_addr, 6, eth_offset + 0);
-    pbuf_copy_partial(p, src_addr, 6, eth_offset + 6);
-    uint8_t eth_type_buf[2];
-    pbuf_copy_partial(p, eth_type_buf, 2, eth_offset + 12);
-    ethertype = ((uint16_t)eth_type_buf[0] << 8) | eth_type_buf[1];
+    /* Efficiently cast Ethernet header directly from pbuf payload.
+     * lwIP guarantees that the link-layer header is contiguous in the first pbuf. */
+    struct eth_hdr *eth = (struct eth_hdr *)(p->payload);
+    uint8_t* dst_addr = eth->dest.addr;
+    uint8_t* src_addr = eth->src.addr;
+    uint16_t ethertype = TINYPAN_NTOHS(eth->type);
 
     uint8_t bnep_hdr_len = bnep_get_ethernet_header_len(dst_addr, src_addr);
 

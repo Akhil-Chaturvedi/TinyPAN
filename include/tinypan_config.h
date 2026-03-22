@@ -98,6 +98,13 @@
 #define TINYPAN_DHCP_TIMEOUT_MS             30000
 #endif
 
+/**
+ * Number of retries for DHCP discovery before disconnecting.
+ */
+#ifndef TINYPAN_DHCP_MAX_RETRIES
+#define TINYPAN_DHCP_MAX_RETRIES            3
+#endif
+
 /* ============================================================================
  * Feature Configuration
  * ============================================================================ */

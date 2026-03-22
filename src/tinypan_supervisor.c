@@ -31,6 +31,7 @@ static uint32_t s_last_action_time = 0;
 static uint32_t s_reconnect_delay_ms = 0;
 static uint8_t s_reconnect_attempts = 0;
 static uint8_t s_setup_retries = 0;
+static uint8_t s_dhcp_retries = 0;
 
 /* ============================================================================
  * Helper Functions
@@ -107,6 +108,7 @@ void supervisor_init(const tinypan_config_t* config) {
     s_reconnect_delay_ms = 0;
     s_reconnect_attempts = 0;
     s_setup_retries = 0;
+    s_dhcp_retries = 0;
     s_initialized = true;
     
     TINYPAN_LOG_INFO("Supervisor initialized");
@@ -127,6 +129,7 @@ int supervisor_start(void) {
     s_reconnect_delay_ms = 0;
     s_reconnect_attempts = 0;
     s_setup_retries = 0;
+    s_dhcp_retries = 0;
     
     /* Begin connecting */
     set_state(TINYPAN_STATE_CONNECTING);
@@ -155,6 +158,9 @@ void supervisor_stop(void) {
     set_state(TINYPAN_STATE_IDLE);
     s_reconnect_delay_ms = 0;
     s_reconnect_attempts = 0;
+#if TINYPAN_ENABLE_LWIP
+    tinypan_netif_stop_dhcp();
+#endif
 }
 
 void supervisor_process(void) {
@@ -233,15 +239,26 @@ void supervisor_process(void) {
         case TINYPAN_STATE_DHCP:
             /* Check for timeout */
             if (timeout_elapsed(TINYPAN_DHCP_TIMEOUT_MS)) {
-                TINYPAN_LOG_WARN("DHCP timeout. Disconnecting link to force host IP pool refresh.");
-                hal_bt_l2cap_disconnect();
-                
-#if TINYPAN_ENABLE_AUTO_RECONNECT
-                set_state(TINYPAN_STATE_RECONNECTING);
-                schedule_reconnect();
-#else
-                set_state(TINYPAN_STATE_ERROR);
+                s_dhcp_retries++;
+                if (s_dhcp_retries < TINYPAN_DHCP_MAX_RETRIES) {
+                    TINYPAN_LOG_WARN("DHCP timeout, retrying discovery (attempt %u/%u)", 
+                                     s_dhcp_retries + 1, TINYPAN_DHCP_MAX_RETRIES);
+                    s_state_enter_time = hal_get_tick_ms();
+#if TINYPAN_ENABLE_LWIP
+                    tinypan_netif_start_dhcp();
 #endif
+                } else {
+                    TINYPAN_LOG_ERROR("DHCP failed after %u attempts. Disconnecting link.", 
+                                      TINYPAN_DHCP_MAX_RETRIES);
+                    hal_bt_l2cap_disconnect();
+                    
+#if TINYPAN_ENABLE_AUTO_RECONNECT
+                    set_state(TINYPAN_STATE_RECONNECTING);
+                    schedule_reconnect();
+#else
+                    set_state(TINYPAN_STATE_ERROR);
+#endif
+                }
             }
             break;
             
@@ -318,13 +335,13 @@ void supervisor_on_l2cap_event(int event, int status) {
                     set_state(TINYPAN_STATE_BNEP_SETUP);
                     s_setup_retries = 0;
                 } else {
-                    /* QA-20: SLIP (Raw IP) does not support DHCP. 
+                    /* SLIP (Raw IP) does not support DHCP. 
                      * Transition directly to ONLINE to prevent timeout suicide loops. */
                     set_state(TINYPAN_STATE_ONLINE);
 #if TINYPAN_ENABLE_LWIP
                     tinypan_netif_set_link(true);
 #if TINYPAN_USE_BLE_SLIP && TINYPAN_SLIP_AUTO_IP
-                    /* QA-22: Automatically assign a static IP since DHCP is bypassed. */
+                    /* Automatically assign a static IP since DHCP is bypassed. */
                     TINYPAN_LOG_INFO("Assigning static IP for SLIP mode");
                     tinypan_internal_set_ip(
                         TINYPAN_SLIP_IP_ADDR, 
@@ -359,6 +376,10 @@ void supervisor_on_l2cap_event(int event, int status) {
             /* Internal State: Clear IP information on disconnect to ensure 
              * tinypan_is_online() reflects current link status. */
             tinypan_internal_clear_ip();
+
+            /* Explicitly stop DHCP to prevent split-brain where lwIP 
+             * continues to background-poll for a lease on a dead link. */
+            tinypan_netif_stop_dhcp();
 #endif
             
             if (s_state == TINYPAN_STATE_ONLINE || 
@@ -507,6 +528,7 @@ void supervisor_on_bnep_filter_response(uint16_t response_code) {
     }
 
     set_state(TINYPAN_STATE_DHCP);
+    s_dhcp_retries = 0; /* Reset retry counter on first entry */
 #if TINYPAN_ENABLE_LWIP
     tinypan_netif_set_link(true);
     if (tinypan_netif_start_dhcp() < 0) {

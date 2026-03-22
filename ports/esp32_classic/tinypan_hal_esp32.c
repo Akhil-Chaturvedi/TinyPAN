@@ -111,15 +111,9 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
                 
                 event_msg.event_id = HAL_L2CAP_EVENT_CONNECTED;
                 if (xQueueSend(s_event_queue, &event_msg, 0) != pdTRUE) {
-                    /* Queue full: the supervisor cannot learn of this connection.
-                     * Force-close the radio channel to restore a clean state. */
-                    ESP_LOGE(TAG, "Event queue full on CONNECTED; force-closing channel");
-                    portENTER_CRITICAL(&s_state_spinlock);
-                    esp_bt_l2cap_close(s_l2cap_handle);
-                    s_is_connected = false;
-                    s_tx_busy = false;
-                    s_l2cap_handle = 0;
-                    portEXIT_CRITICAL(&s_state_spinlock);
+                    /* QA-23: Drop event but don't kill the hardware link. 
+                     * The supervisor will eventually time out and recover. */
+                    ESP_LOGE(TAG, "Event queue full on CONNECTED; state desync possible");
                 }
             } else {
                 event_msg.event_id = HAL_L2CAP_EVENT_CONNECT_FAILED;
@@ -157,9 +151,10 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
                     memcpy(s_rx_ring_data[s_rx_ring_head], param->data_ind.data, copy_len);
                     s_rx_ring_len[s_rx_ring_head] = copy_len;
                     
-                    /* Memory Barrier: Ensure data is written before updating head */
-                    portMEMORY_BARRIER();
+                    /* Atomic index update for multi-core safety */
+                    portENTER_CRITICAL(&s_state_spinlock);
                     s_rx_ring_head = next_head;
+                    portEXIT_CRITICAL(&s_state_spinlock);
 
                     if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
                 } else {
@@ -226,9 +221,10 @@ void hal_bt_poll(void) {
                       s_recv_cb_data);
         }
         
-        /* Memory Barrier: Ensure data is read before updating tail */
-        portMEMORY_BARRIER();
+        /* Atomic index update for multi-core safety */
+        portENTER_CRITICAL(&s_state_spinlock);
         s_rx_ring_tail = (s_rx_ring_tail + 1) % TINYPAN_ESP_RX_RING_SLOTS;
+        portEXIT_CRITICAL(&s_state_spinlock);
     }
 }
 
@@ -259,13 +255,16 @@ void hal_bt_deinit(void) {
     if (!s_hal_initialized) return;
 
     portENTER_CRITICAL(&s_state_spinlock);
-    if (s_is_connected) {
-        esp_bt_l2cap_close(s_l2cap_handle);
-    }
+    uint32_t handle = s_l2cap_handle;
+    bool connected = s_is_connected;
     s_is_connected = false;
     s_tx_busy = false;
     s_l2cap_handle = 0;
     portEXIT_CRITICAL(&s_state_spinlock);
+    
+    if (connected) {
+        esp_bt_l2cap_close(handle);
+    }
     
     esp_bt_l2cap_deinit();
     
@@ -285,10 +284,13 @@ int hal_bt_l2cap_connect(const uint8_t* remote_addr, uint16_t local_mtu) {
 
 void hal_bt_l2cap_disconnect(void) {
     portENTER_CRITICAL(&s_state_spinlock);
-    if (s_is_connected) {
-        esp_bt_l2cap_close(s_l2cap_handle);
-    }
+    uint32_t handle = s_l2cap_handle;
+    bool connected = s_is_connected;
     portEXIT_CRITICAL(&s_state_spinlock);
+
+    if (connected) {
+        esp_bt_l2cap_close(handle);
+    }
 }
 
 void hal_bt_l2cap_register_recv_callback(hal_l2cap_recv_callback_t cb, void* user_data) {
@@ -376,6 +378,10 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
 }
 
 int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
+    /* Architectural Note: Bluedroid's `esp_bt_l2cap_data_write` requires a 
+     * contiguous buffer. We bounce the BNEP iovec into a static aligned buffer 
+     * here. While this adds a copy on ESP32, the transport layer provides 
+     * zero-copy capability for DMA-native BLE stacks (e.g. nRF52). */
     portENTER_CRITICAL(&s_state_spinlock);
     uint32_t handle = s_l2cap_handle;
     bool connected = s_is_connected;

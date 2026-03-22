@@ -59,7 +59,9 @@ K_MSGQ_DEFINE(s_zephyr_event_q, sizeof(struct z_event_msg), 16, 4);
 /* Concurrency: Lock-free Zephyr Ring Buffer replaces K_MUTEX_DEFINE to prevent stalls.
  * Size is increased to 4KB to handle TCP window bursts and prevent overflows
  * during high-throughput transfers if the app thread is busy. */
-RING_BUF_DECLARE(s_rx_ringbuf, 4096);
+/* QA-23: Reduced from 4096 to 512 bytes to save RAM. 4KB was excessive 
+ * for a 247-byte MTU link even with TCP windowing. */
+RING_BUF_DECLARE(s_rx_ringbuf, 512);
 
 /* SLIP TX Chunker */
 /* TinyPAN passes ~1500 byte SLIP MTU frames. NUS must chunk them to BLE MTU */

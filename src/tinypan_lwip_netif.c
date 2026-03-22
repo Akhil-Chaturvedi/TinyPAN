@@ -156,7 +156,7 @@ static void tinypan_netif_status_callback(struct netif* netif) {
             /* Notify the main TinyPAN module */
             tinypan_internal_set_ip(ip->addr, mask->addr, gw->addr, 0);
         } else {
-            /* QA-17: Fix DHCP split-brain - clear IP if address is lost/expired */
+            /* Link desync recovery: clear IP if address is lost/expired */
             tinypan_internal_clear_ip();
         }
     }
@@ -249,7 +249,7 @@ int tinypan_netif_start_dhcp(void) {
     
     TINYPAN_LOG_INFO("netif: Starting DHCP...");
     
-    /* QA-19: DHCP requires Ethernet broadcast and a MAC addr. 
+    /* DHCP requires Ethernet broadcast and a MAC addr. 
      * SLIP is Raw IP/P2P; prohibit DHCP to avoid silent failures. */
     const tinypan_transport_t* transport = tinypan_transport_get();
     if (transport == &transport_slip) {
@@ -300,14 +300,17 @@ void tinypan_netif_input(const uint8_t* dst_addr, const uint8_t* src_addr,
         return;
     }
     
-    /* In SLIP mode, the transport layer's handle_incoming callback feeds raw
-       bytes directly into the streaming SLIP FSM (tinypan_slip_transport.c).
-       This function is only used to inject Ethernet frames into lwIP (from BNEP). */
-    
     if (dst_addr == NULL || src_addr == NULL) {
         return;
     }
     
+    /* Strict bounds check to prevent uint16_t overflow (14 + payload_len)
+     * and heap corruption in subsequent pbuf_take_at calls. */
+    if (payload_len > TINYPAN_MAX_FRAME_SIZE) {
+        TINYPAN_LOG_WARN("netif: Packet too large (%u)", payload_len);
+        return;
+    }
+
     uint16_t total_len = 14 + payload_len;
     TINYPAN_LOG_DEBUG("netif RX: %u bytes", total_len);
     

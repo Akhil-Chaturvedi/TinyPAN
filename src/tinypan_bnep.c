@@ -29,6 +29,9 @@ static uint8_t s_local_addr[BNEP_ETHER_ADDR_LEN] = {0};
 /** Remote Ethernet/Bluetooth address */
 static uint8_t s_remote_addr[BNEP_ETHER_ADDR_LEN] = {0};
 
+/** Cached compression flag to avoid redundant state checks in TX path */
+static bool s_can_compress = false;
+
 /** Frame receive callback */
 static bnep_frame_recv_callback_t s_frame_callback = NULL;
 static void* s_frame_callback_user_data = NULL;
@@ -433,6 +436,7 @@ void bnep_init(void) {
     s_state = BNEP_STATE_CLOSED;
     memset(s_local_addr, 0, sizeof(s_local_addr));
     memset(s_remote_addr, 0, sizeof(s_remote_addr));
+    s_can_compress = false;
     s_frame_callback = NULL;
     s_state_callback = NULL;
     s_setup_response_callback = NULL;
@@ -447,6 +451,9 @@ void bnep_reset(void) {
 void bnep_set_local_addr(const uint8_t addr[BNEP_ETHER_ADDR_LEN]) {
     if (addr != NULL) {
         memcpy(s_local_addr, addr, BNEP_ETHER_ADDR_LEN);
+        /* Update cached compression flag */
+        s_can_compress = (s_local_addr[0] != 0 || s_local_addr[5] != 0) && 
+                         (s_remote_addr[0] != 0 || s_remote_addr[5] != 0);
         TINYPAN_LOG_DEBUG("BNEP local addr: %02X:%02X:%02X:%02X:%02X:%02X",
                           addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
     }
@@ -455,6 +462,9 @@ void bnep_set_local_addr(const uint8_t addr[BNEP_ETHER_ADDR_LEN]) {
 void bnep_set_remote_addr(const uint8_t addr[BNEP_ETHER_ADDR_LEN]) {
     if (addr != NULL) {
         memcpy(s_remote_addr, addr, BNEP_ETHER_ADDR_LEN);
+        /* Update cached compression flag */
+        s_can_compress = (s_local_addr[0] != 0 || s_local_addr[5] != 0) && 
+                         (s_remote_addr[0] != 0 || s_remote_addr[5] != 0);
         TINYPAN_LOG_DEBUG("BNEP remote addr: %02X:%02X:%02X:%02X:%02X:%02X",
                           addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
     }
@@ -578,9 +588,12 @@ uint8_t bnep_get_ethernet_header_len(const uint8_t* dst_addr, const uint8_t* src
      * Fall back to General Ethernet (type 0x00, 15 bytes) for any frame whose
      * addresses do not match — though in practice all outbound lwIP frames go to
      * the NAP's MAC address constructed at session setup. */
-    if (dst_addr != NULL && src_addr != NULL &&
-        memcmp(dst_addr,  s_remote_addr, BNEP_ETHER_ADDR_LEN) == 0 &&
-        memcmp(src_addr,  s_local_addr,  BNEP_ETHER_ADDR_LEN) == 0) {
+    /* Use cached s_can_compress flag and first-byte fast-path check
+     * to avoid O(N) memcmp on every packet in the TX path. */
+    if (s_can_compress && dst_addr && src_addr &&
+        dst_addr[5] == s_remote_addr[5] && src_addr[5] == s_local_addr[5] &&
+        memcmp(dst_addr, s_remote_addr, 6) == 0 &&
+        memcmp(src_addr, s_local_addr, 6) == 0) {
         return 3; /* Compressed Ethernet: type(1) + EtherType(2) */
     }
     return 15; /* General Ethernet: type(1) + dst(6) + src(6) + EtherType(2) */
@@ -638,6 +651,8 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
                     if (s_setup_response_callback) {
                         s_setup_response_callback(response.response_code,
                                                    s_setup_response_callback_user_data);
+                    } else {
+                        TINYPAN_LOG_WARN("BNEP: Setup response callback is NULL!");
                     }
                 } else {
                     TINYPAN_LOG_ERROR("Failed to parse setup response");
