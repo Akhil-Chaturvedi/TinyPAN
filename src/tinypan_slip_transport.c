@@ -151,8 +151,13 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
                     if (s_slip_rx_pbuf) pbuf_take(s_slip_rx_pbuf, s_slip_rx_staging_buf, s_slip_rx_staging_len);
                 } else {
                     /* Append remaining staging data to pbuf chain */
-                    pbuf_take_at(s_slip_rx_pbuf, s_slip_rx_staging_buf, s_slip_rx_staging_len, s_slip_rx_total_offset);
-                    pbuf_realloc(s_slip_rx_pbuf, s_slip_rx_total_offset + s_slip_rx_staging_len);
+                    if (pbuf_take_at(s_slip_rx_pbuf, s_slip_rx_staging_buf, s_slip_rx_staging_len, s_slip_rx_total_offset) != ERR_OK) {
+                        TINYPAN_LOG_ERROR("slip_rx: pbuf_take_at failed, dropping frame");
+                        pbuf_free(s_slip_rx_pbuf);
+                        s_slip_rx_pbuf = NULL;
+                    } else {
+                        pbuf_realloc(s_slip_rx_pbuf, s_slip_rx_total_offset + s_slip_rx_staging_len);
+                    }
                 }
                 
                 if (s_slip_rx_pbuf) {
@@ -200,7 +205,14 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
             }
 
             if (s_slip_rx_pbuf) {
-                pbuf_take_at(s_slip_rx_pbuf, s_slip_rx_staging_buf, s_slip_rx_staging_len, s_slip_rx_total_offset);
+                if (pbuf_take_at(s_slip_rx_pbuf, s_slip_rx_staging_buf, s_slip_rx_staging_len, s_slip_rx_total_offset) != ERR_OK) {
+                    TINYPAN_LOG_ERROR("slip_rx: pbuf_take_at failed, seeking end");
+                    pbuf_free(s_slip_rx_pbuf);
+                    s_slip_rx_pbuf = NULL;
+                    s_slip_rx_staging_len = 0;
+                    s_slip_rx_seeking_end = true;
+                    continue;
+                }
                 s_slip_rx_total_offset += s_slip_rx_staging_len;
                 s_slip_rx_staging_len = 0;
             } else {
@@ -282,29 +294,57 @@ void slip_transport_drain_tx_queue(void) {
      * throughput should be aware that worst-case payloads will take twice as 
      * long to transmit over the BLE link due to this expansion.
      */
-    /* Unified Single-Pass Loop.
-     * Replaced the dual-pass memchr scan with a simpler, faster single loop 
-     * that performs both boundary check and byte escaping in one pass. 
-     * This eliminates 50% of memory access instructions in the hot path. */
+    /* Optimized Multi-Pass Encoder.
+     * Replaces manual byte-by-byte loop with memchr() and bulk memcpy(). 
+     * memchr() is SIMD-optimized in most libc implementations, significantly 
+     * outperforming manual branching on bulk data. */
     while (s_slip_tx_current != NULL && chunk_idx < max_chunk - 2) {
-        uint8_t* payload = (uint8_t*)s_slip_tx_current->payload;
-        while (s_slip_tx_offset < s_slip_tx_current->len && chunk_idx < max_chunk - 2) {
-            uint8_t c = payload[s_slip_tx_offset++];
-            if (c == SLIP_END) {
-                s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
-                s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_END;
-            } else if (c == SLIP_ESC) {
-                s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
-                s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_ESC;
-            } else {
-                s_slip_chunk_buf[chunk_idx++] = c;
+        uint8_t* payload = (uint8_t*)s_slip_tx_current->payload + s_slip_tx_offset;
+        uint16_t rem_len = s_slip_tx_current->len - s_slip_tx_offset;
+        uint16_t space = max_chunk - 2 - chunk_idx;
+        uint16_t search_len = (rem_len < space) ? rem_len : space;
+        
+        if (search_len == 0) {
+            s_slip_tx_current = s_slip_tx_current->next;
+            s_slip_tx_offset = 0;
+            continue;
+        }
+
+        uint8_t* next_end = memchr(payload, SLIP_END, search_len);
+        uint8_t* next_esc = memchr(payload, SLIP_ESC, search_len);
+        uint8_t* next_target = NULL;
+
+        if (next_end && next_esc) {
+            next_target = (next_end < next_esc) ? next_end : next_esc;
+        } else {
+            next_target = next_end ? next_end : next_esc;
+        }
+
+        if (next_target) {
+            uint16_t bulk_len = (uint16_t)(next_target - payload);
+            if (bulk_len > 0) {
+                memcpy(&s_slip_chunk_buf[chunk_idx], payload, bulk_len);
+                chunk_idx += bulk_len;
+                s_slip_tx_offset += bulk_len;
+            }
+            
+            /* Escape the special character */
+            uint8_t c = *next_target;
+            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
+            s_slip_chunk_buf[chunk_idx++] = (c == SLIP_END) ? SLIP_ESC_END : SLIP_ESC_ESC;
+            s_slip_tx_offset++;
+        } else {
+            /* No characters to escape in the current bulk window */
+            memcpy(&s_slip_chunk_buf[chunk_idx], payload, search_len);
+            chunk_idx += search_len;
+            s_slip_tx_offset += search_len;
+            
+            if (s_slip_tx_offset >= s_slip_tx_current->len) {
+                s_slip_tx_current = s_slip_tx_current->next;
+                s_slip_tx_offset = 0;
             }
         }
-                if (s_slip_tx_offset >= s_slip_tx_current->len) {
-                    s_slip_tx_current = s_slip_tx_current->next;
-                    s_slip_tx_offset = 0;
-                }
-            }
+    }
             if (s_slip_tx_current == NULL) {
                 s_slip_tx_state = 2;
             }

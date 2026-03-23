@@ -11,9 +11,9 @@
  * The ESP-IDF Bluetooth stack executes all callbacks (e.g. `esp_l2cap_cb`)
  * on a dedicated internal FreeRTOS task (`btu_task`). TinyPAN is strictly
  * single-threaded. Incoming data is bridged to the application thread via
- * a static lock-free ring buffer (`s_rx_ring_data`). Events (connect/disconnect)
- * are bridged via a small FreeRTOS queue. Memory barriers (`portMEMORY_BARRIER`)
- * guard head/tail index updates for correct multi-core visibility.
+ * a dynamic pbuf pointer queue (`s_rx_queue`). Events (connect/disconnect)
+ * are bridged via a small FreeRTOS event queue. Memory barriers and critical
+ * sections guard head/tail updates for correct multi-core visibility.
  */
 
 #include "tinypan_hal.h"
@@ -29,6 +29,7 @@
 #include <esp_timer.h>
 #include <string.h>
 #include <stdlib.h>
+#include "lwip/pbuf.h"
 
 static const char* TAG = "TinyPAN_HAL";
 
@@ -58,29 +59,15 @@ static bool s_tx_complete_pending = false;
 /* Used to align and pack unaligned or non-contiguous data for DMA safety */
 static uint8_t s_tx_aligned_buf[TINYPAN_L2CAP_MTU + 32];
 
-/* Static RX ring buffer: avoids malloc/free in the BT callback context,
- * preventing heap fragmentation on ESP32's split DRAM architecture.
- *
- * Static RAM cost: TINYPAN_ESP_RX_RING_SLOTS * TINYPAN_ESP_RX_SLOT_SIZE bytes.
- * At default values (4 slots, TINYPAN_L2CAP_MTU+16 = 1707 bytes each) this is
- * approximately 6.8 KB of BSS. Override either macro before including this file
- * to reduce footprint for applications where the network layer can tolerate
- * a smaller slot count or smaller maximum frame size:
- *
- *   #define TINYPAN_ESP_RX_RING_SLOTS  2    // 2 frames in-flight: ~3.4 KB
- *   #define TINYPAN_ESP_RX_SLOT_SIZE   512  // Smaller frames only: ~1 KB
- */
-#ifndef TINYPAN_ESP_RX_RING_SLOTS
-#define TINYPAN_ESP_RX_RING_SLOTS   4
-#endif
-#ifndef TINYPAN_ESP_RX_SLOT_SIZE
-#define TINYPAN_ESP_RX_SLOT_SIZE    (TINYPAN_L2CAP_MTU + 16)
+/* RX Queue: Stores pointers to pbufs allocated in the BT task.
+ * This replaces the 6.8KB static ring buffer with a 16-slot pointer queue (64 bytes). */
+#ifndef TINYPAN_ESP_RX_QUEUE_SIZE
+#define TINYPAN_ESP_RX_QUEUE_SIZE   16
 #endif
 
-static uint8_t s_rx_ring_data[TINYPAN_ESP_RX_RING_SLOTS][TINYPAN_ESP_RX_SLOT_SIZE];
-static uint16_t s_rx_ring_len[TINYPAN_ESP_RX_RING_SLOTS];
-static volatile uint8_t s_rx_ring_head = 0; /* Written by BT task */
-static volatile uint8_t s_rx_ring_tail = 0; /* Read by app task */
+static QueueHandle_t s_rx_queue = NULL;
+static volatile uint8_t s_rx_ring_head = 0; /* Written by BT task, for diagnostic/counting only */
+static volatile uint8_t s_rx_ring_tail = 0; /* Read by app task, for diagnostic/counting only */
 
 typedef struct {
     int event_id;
@@ -141,24 +128,29 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
             break;
 
         case ESP_BT_L2CAP_DATA_IND_EVT:
-            /* Static Ring Buffer: Copy incoming data directly into a pre-allocated
-             * slot, avoiding malloc/free in the BT controller task. */
+            /* PBUF RX Path: Allocate pbuf directly in callback context and queue the pointer.
+             * This avoids the giant static RX ring buffer and relies on lwIP's pool. */
             if (param->data_ind.len > 0 && param->data_ind.data) {
-                uint8_t next_head = (s_rx_ring_head + 1) % TINYPAN_ESP_RX_RING_SLOTS;
-                if (next_head != s_rx_ring_tail) {
-                    uint16_t copy_len = (param->data_ind.len <= TINYPAN_ESP_RX_SLOT_SIZE)
-                                        ? param->data_ind.len : TINYPAN_ESP_RX_SLOT_SIZE;
-                    memcpy(s_rx_ring_data[s_rx_ring_head], param->data_ind.data, copy_len);
-                    s_rx_ring_len[s_rx_ring_head] = copy_len;
-                    
-                    /* Atomic index update for multi-core safety */
-                    portENTER_CRITICAL(&s_state_spinlock);
-                    s_rx_ring_head = next_head;
-                    portEXIT_CRITICAL(&s_state_spinlock);
+                /* Since BT task runs on a different core, we must protect the pbuf pool.
+                 * TinyPAN uses NO_SYS=1, so we manually guard the allocation. */
+                portENTER_CRITICAL(&s_state_spinlock);
+                struct pbuf* p = pbuf_alloc(PBUF_RAW, param->data_ind.len, PBUF_POOL);
+                portEXIT_CRITICAL(&s_state_spinlock);
 
-                    if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
+                if (p) {
+                    pbuf_take(p, param->data_ind.data, param->data_ind.len);
+                    if (xQueueSend(s_rx_queue, &p, 0) == pdTRUE) {
+                        s_rx_ring_head++; /* Purely for statistics/health check */
+                        if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
+                    } else {
+                        /* Queue full, must free the pbuf */
+                        portENTER_CRITICAL(&s_state_spinlock);
+                        pbuf_free(p);
+                        portEXIT_CRITICAL(&s_state_spinlock);
+                        ESP_LOGW(TAG, "RX pointer queue full, dropped frame");
+                    }
                 } else {
-                    ESP_LOGW(TAG, "RX ring full, dropped inbound L2CAP frame");
+                    ESP_LOGE(TAG, "Failed to allocate pbuf for incoming data (len=%u)", param->data_ind.len);
                 }
             }
             break;
@@ -213,18 +205,18 @@ void hal_bt_poll(void) {
         }
     }
 
-    /* Drain L2CAP data from static ring buffer */
-    while (s_rx_ring_tail != s_rx_ring_head) {
-        if (s_recv_cb) {
-            s_recv_cb(s_rx_ring_data[s_rx_ring_tail],
-                      s_rx_ring_len[s_rx_ring_tail],
-                      s_recv_cb_data);
+    /* Drain L2CAP data from pbuf queue */
+    struct pbuf* p = NULL;
+    while (xQueueReceive(s_rx_queue, &p, 0) == pdTRUE) {
+        if (p && s_recv_cb) {
+            s_recv_cb(p->payload, p->len, s_recv_cb_data);
         }
-        
-        /* Atomic index update for multi-core safety */
-        portENTER_CRITICAL(&s_state_spinlock);
-        s_rx_ring_tail = (s_rx_ring_tail + 1) % TINYPAN_ESP_RX_RING_SLOTS;
-        portEXIT_CRITICAL(&s_state_spinlock);
+        if (p) {
+            portENTER_CRITICAL(&s_state_spinlock);
+            pbuf_free(p);
+            portEXIT_CRITICAL(&s_state_spinlock);
+        }
+        s_rx_ring_tail++; /* Purely for statistics/health check */
     }
 }
 
@@ -236,8 +228,9 @@ int hal_bt_init(void) {
     if (s_hal_initialized) return 0;
 
     s_event_queue = xQueueCreate(TINYPAN_ESP_EVENT_QUEUE_SIZE, sizeof(esp_event_msg_t));
+    s_rx_queue = xQueueCreate(TINYPAN_ESP_RX_QUEUE_SIZE, sizeof(struct pbuf*));
 
-    /* Reset static RX ring buffer */
+    /* Reset diagnostic counters */
     s_rx_ring_head = 0;
     s_rx_ring_tail = 0;
 
@@ -269,6 +262,14 @@ void hal_bt_deinit(void) {
     esp_bt_l2cap_deinit();
     
     if (s_event_queue) vQueueDelete(s_event_queue);
+    
+    if (s_rx_queue) {
+        struct pbuf* p;
+        while (xQueueReceive(s_rx_queue, &p, 0) == pdTRUE) {
+            if (p) pbuf_free(p);
+        }
+        vQueueDelete(s_rx_queue);
+    }
     
     s_rx_ring_head = 0;
     s_rx_ring_tail = 0;

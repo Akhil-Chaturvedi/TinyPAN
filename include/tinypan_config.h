@@ -105,6 +105,14 @@
 #define TINYPAN_DHCP_MAX_RETRIES            3
 #endif
 
+/**
+ * Timeout for in-flight BNEP packets waiting for TX_COMPLETE (ms).
+ * Prevents memory exhaustion if the Bluetooth hardware fails to signal completion.
+ */
+#ifndef TINYPAN_BNEP_TX_TIMEOUT_MS
+#define TINYPAN_BNEP_TX_TIMEOUT_MS          2000
+#endif
+
 /* ============================================================================
  * Feature Configuration
  * ============================================================================ */
@@ -165,6 +173,13 @@
  */
 #ifndef TINYPAN_SLIP_CHUNK_SIZE
 #define TINYPAN_SLIP_CHUNK_SIZE             247
+#endif
+
+/**
+ * Depth of the ESP32 HAL internal event queue.
+ */
+#ifndef TINYPAN_ESP_EVENT_QUEUE_SIZE
+#define TINYPAN_ESP_EVENT_QUEUE_SIZE        16
 #endif
 
 /**

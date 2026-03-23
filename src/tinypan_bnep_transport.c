@@ -106,6 +106,7 @@ typedef struct {
     uint8_t hdr_len;
     tinypan_iovec_t iov[6]; /* Reduced from 16 to 6 to save RAM; 16-chain pbufs are invalid. */
     uint16_t iov_count;
+    uint32_t sent_at_ms;
     bool in_flight;
 } bnep_tx_job_t;
 
@@ -130,8 +131,21 @@ void bnep_transport_drain_tx_queue(void) {
         bnep_tx_job_t* job = &s_bnep_tx_queue[s_bnep_tx_head];
         
         if (job->in_flight) {
-            /* Wait for TX completion interrupt from hardware */
-            break;
+            /* Check for hardware/link timeout. If a packet is in flight but the 
+             * TX_COMPLETE interrupt was lost (e.g. stack glitch or link drop), 
+             * we must forcibly time out to reclaim memory. */
+            uint32_t now = hal_get_tick_ms();
+            if (now - job->sent_at_ms > TINYPAN_BNEP_TX_TIMEOUT_MS) {
+                TINYPAN_LOG_ERROR("transport_bnep: TX timeout (in_flight=%d, job=%p, p=%p)", 
+                                   job->in_flight, (void*)job, (void*)job->p);
+                struct pbuf* q = job->p;
+                job->p = NULL;
+                job->in_flight = false;
+                s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
+                if (q) pbuf_free(q);
+                continue; /* Try sending the next packet in the queue */
+            }
+            break; /* Packet still legitimately in flight */
         }
         
         struct pbuf* q = job->p;
@@ -182,6 +196,7 @@ void bnep_transport_drain_tx_queue(void) {
         if (result == 0) {
             /* Success - HW DMA transfer initiated. Wait for complete event. */
             job->in_flight = true;
+            job->sent_at_ms = hal_get_tick_ms();
             break; /* Standard L2CAP serialization requires one packet at a time */
         } else if (result > 0) {
             hal_bt_l2cap_request_can_send_now();
@@ -246,12 +261,17 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
      * the BNEP header locally in the queue struct, and pass it directly into
      * iov[0] while the remaining pbuf segments map to iov[1..N]. */
 
-    /* Efficiently cast Ethernet header directly from pbuf payload.
-     * lwIP guarantees that the link-layer header is contiguous in the first pbuf. */
-    struct eth_hdr *eth = (struct eth_hdr *)(p->payload);
-    uint8_t* dst_addr = eth->dest.addr;
-    uint8_t* src_addr = eth->src.addr;
-    uint16_t ethertype = TINYPAN_NTOHS(eth->type);
+    /* Read Ethernet header via safe byte indexing to avoid unaligned access faults
+     * on architectures that do not support non-word-aligned pointers (e.g. ARM Cortex-M0).
+     * We must also respect ETH_PAD_SIZE to correctly locate the start of the header. */
+#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
+    uint8_t* eth_ptr = (uint8_t*)p->payload + ETH_PAD_SIZE;
+#else
+    uint8_t* eth_ptr = (uint8_t*)p->payload;
+#endif
+    uint8_t* dst_addr = &eth_ptr[0];
+    uint8_t* src_addr = &eth_ptr[6];
+    uint16_t ethertype = (eth_ptr[12] << 8) | eth_ptr[13];
 
     uint8_t bnep_hdr_len = bnep_get_ethernet_header_len(dst_addr, src_addr);
 
@@ -267,6 +287,7 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
     job->p = p;
     job->hdr_len = bnep_hdr_len;
     job->in_flight = false;
+    job->sent_at_ms = 0;
     bnep_write_ethernet_header(job->hdr, bnep_hdr_len, dst_addr, src_addr, ethertype);
     
     s_bnep_tx_tail = next_tail;
