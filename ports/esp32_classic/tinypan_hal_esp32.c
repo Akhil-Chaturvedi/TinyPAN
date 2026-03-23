@@ -21,6 +21,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/message_buffer.h>
 #include <esp_log.h>
 #include <esp_bt.h>
 #include <esp_bt_main.h>
@@ -59,13 +60,15 @@ static bool s_tx_complete_pending = false;
 /* Used to align and pack unaligned or non-contiguous data for DMA safety */
 static uint8_t s_tx_aligned_buf[TINYPAN_L2CAP_MTU + 32];
 
-/* RX Queue: Stores pointers to pbufs allocated in the BT task.
- * This replaces the 6.8KB static ring buffer with a 16-slot pointer queue (64 bytes). */
-#ifndef TINYPAN_ESP_RX_QUEUE_SIZE
-#define TINYPAN_ESP_RX_QUEUE_SIZE   16
+/* RX Message Buffer: Safely bridges raw Bluetooth payloads from the BT ISR
+ * to the main application task without touching the lwIP heap allocators.
+ * Size defaults to 2048 bytes to hold at least one maximum MTU burst. */
+#ifndef TINYPAN_ESP_RX_MSG_BUF_SIZE
+#define TINYPAN_ESP_RX_MSG_BUF_SIZE   2048
 #endif
 
-static QueueHandle_t s_rx_queue = NULL;
+static MessageBufferHandle_t s_rx_msg_buf = NULL;
+static uint8_t s_rx_poll_temp_buf[TINYPAN_L2CAP_MTU + 32];
 static volatile uint8_t s_rx_ring_head = 0; /* Written by BT task, for diagnostic/counting only */
 static volatile uint8_t s_rx_ring_tail = 0; /* Read by app task, for diagnostic/counting only */
 
@@ -98,8 +101,7 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
                 
                 event_msg.event_id = HAL_L2CAP_EVENT_CONNECTED;
                 if (xQueueSend(s_event_queue, &event_msg, 0) != pdTRUE) {
-                    /* QA-23: Drop event but don't kill the hardware link. 
-                     * The supervisor will eventually time out and recover. */
+                    /* Drop event but preserve the hardware link; supervisor timeout will recover. */
                     ESP_LOGE(TAG, "Event queue full on CONNECTED; state desync possible");
                 }
             } else {
@@ -128,29 +130,17 @@ static void esp_l2cap_cb(esp_bt_l2cap_cb_event_t event, esp_bt_l2cap_cb_param_t 
             break;
 
         case ESP_BT_L2CAP_DATA_IND_EVT:
-            /* PBUF RX Path: Allocate pbuf directly in callback context and queue the pointer.
-             * This avoids the giant static RX ring buffer and relies on lwIP's pool. */
+            /* Thread-Safe RX Path: Push raw bytes into FreeRTOS MessageBuffer.
+             * Crucially, we NEVER call lwIP functions (like pbuf_alloc) from this BT
+             * callback task to avoid corrupting the unprotected lwIP heap or destroying
+             * RTOS interrupt latency with lock-heavy operations. */
             if (param->data_ind.len > 0 && param->data_ind.data) {
-                /* Since BT task runs on a different core, we must protect the pbuf pool.
-                 * TinyPAN uses NO_SYS=1, so we manually guard the allocation. */
-                portENTER_CRITICAL(&s_state_spinlock);
-                struct pbuf* p = pbuf_alloc(PBUF_RAW, param->data_ind.len, PBUF_POOL);
-                portEXIT_CRITICAL(&s_state_spinlock);
-
-                if (p) {
-                    pbuf_take(p, param->data_ind.data, param->data_ind.len);
-                    if (xQueueSend(s_rx_queue, &p, 0) == pdTRUE) {
-                        s_rx_ring_head++; /* Purely for statistics/health check */
-                        if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
-                    } else {
-                        /* Queue full, must free the pbuf */
-                        portENTER_CRITICAL(&s_state_spinlock);
-                        pbuf_free(p);
-                        portEXIT_CRITICAL(&s_state_spinlock);
-                        ESP_LOGW(TAG, "RX pointer queue full, dropped frame");
-                    }
+                size_t sent = xMessageBufferSend(s_rx_msg_buf, param->data_ind.data, param->data_ind.len, 0);
+                if (sent == param->data_ind.len) {
+                    s_rx_ring_head++; /* Purely for statistics/health check */
+                    if (s_wakeup_cb) s_wakeup_cb(s_wakeup_cb_data);
                 } else {
-                    ESP_LOGE(TAG, "Failed to allocate pbuf for incoming data (len=%u)", param->data_ind.len);
+                    ESP_LOGW(TAG, "RX MessageBuffer full, dropped frame (len=%u)", param->data_ind.len);
                 }
             }
             break;
@@ -205,16 +195,11 @@ void hal_bt_poll(void) {
         }
     }
 
-    /* Drain L2CAP data from pbuf queue */
-    struct pbuf* p = NULL;
-    while (xQueueReceive(s_rx_queue, &p, 0) == pdTRUE) {
-        if (p && s_recv_cb) {
-            s_recv_cb(p->payload, p->len, s_recv_cb_data);
-        }
-        if (p) {
-            portENTER_CRITICAL(&s_state_spinlock);
-            pbuf_free(p);
-            portEXIT_CRITICAL(&s_state_spinlock);
+    /* Drain L2CAP data from MessageBuffer */
+    size_t rx_len;
+    while ((rx_len = xMessageBufferReceive(s_rx_msg_buf, s_rx_poll_temp_buf, sizeof(s_rx_poll_temp_buf), 0)) > 0) {
+        if (s_recv_cb) {
+            s_recv_cb(s_rx_poll_temp_buf, (uint16_t)rx_len, s_recv_cb_data);
         }
         s_rx_ring_tail++; /* Purely for statistics/health check */
     }
@@ -228,7 +213,7 @@ int hal_bt_init(void) {
     if (s_hal_initialized) return 0;
 
     s_event_queue = xQueueCreate(TINYPAN_ESP_EVENT_QUEUE_SIZE, sizeof(esp_event_msg_t));
-    s_rx_queue = xQueueCreate(TINYPAN_ESP_RX_QUEUE_SIZE, sizeof(struct pbuf*));
+    s_rx_msg_buf = xMessageBufferCreate(TINYPAN_ESP_RX_MSG_BUF_SIZE);
 
     /* Reset diagnostic counters */
     s_rx_ring_head = 0;
@@ -263,13 +248,7 @@ void hal_bt_deinit(void) {
     
     if (s_event_queue) vQueueDelete(s_event_queue);
     
-    if (s_rx_queue) {
-        struct pbuf* p;
-        while (xQueueReceive(s_rx_queue, &p, 0) == pdTRUE) {
-            if (p) pbuf_free(p);
-        }
-        vQueueDelete(s_rx_queue);
-    }
+    if (s_rx_msg_buf) vMessageBufferDelete(s_rx_msg_buf);
     
     s_rx_ring_head = 0;
     s_rx_ring_tail = 0;
@@ -421,8 +400,7 @@ int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
         return -1;
     }
     
-    /* QA-17: Defer completion to hal_bt_poll to prevent deep stack recursion
-     * if the transport immediately tries to send the next packet. */
+    /* Defer completion to hal_bt_poll to prevent recursion if app thread sends immediately. */
     s_tx_complete_pending = true;
     
     return 0;

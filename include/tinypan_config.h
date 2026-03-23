@@ -32,11 +32,9 @@
 #endif
 
 /**
- * Reference size for a single incoming SLIP or BNEP frame (bytes).
- * This value is NOT used by the library internally. The SLIP transport
- * builds pbuf chains dynamically from pool segments; there is no static
- * receive buffer in the core. Integrators writing a custom HAL may use
- * this value to size their own inbound staging buffers.
+ * Size of the static incoming frame accumulator (bytes).
+ * Used by the SLIP transport to size `s_slip_rx_buf`. Must be large enough
+ * to hold a maximum length BNEP frame plus SLIP escape overhead.
  */
 #ifndef TINYPAN_RX_BUFFER_SIZE
 #define TINYPAN_RX_BUFFER_SIZE          1700

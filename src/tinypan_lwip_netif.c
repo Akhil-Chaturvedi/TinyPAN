@@ -329,16 +329,15 @@ void tinypan_netif_input(const uint8_t* dst_addr, const uint8_t* src_addr,
     pbuf_remove_header(p, ETH_PAD_SIZE); /* Drop padding space temporarily for copying */
 #endif
 
-    /* Copy data directly into pbuf, avoiding intermediate array copies */
-    /* pbuf_take_at handles traversing chained PBUF_POOL pbufs safely */
-    pbuf_take_at(p, dst_addr, 6 /* BNEP_ETHER_ADDR_LEN */, 0);
-    pbuf_take_at(p, src_addr, 6 /* BNEP_ETHER_ADDR_LEN */, 6);
+    /* Write 14-byte Ethernet header directly. PBUF_POOL_BUFSIZE guarantees 
+     * this fits contiguously within the first segment, avoiding O(N) traversal. */
+    uint8_t* p_data = (uint8_t*)p->payload;
+    memcpy(p_data, dst_addr, 6);
+    memcpy(p_data + 6, src_addr, 6);
+    p_data[12] = (uint8_t)(ethertype >> 8);
+    p_data[13] = (uint8_t)(ethertype & 0xFF);
     
-    uint8_t type_bytes[2];
-    type_bytes[0] = (uint8_t)(ethertype >> 8);
-    type_bytes[1] = (uint8_t)(ethertype & 0xFF);
-    pbuf_take_at(p, type_bytes, 2, 12);
-    
+    /* Copy the payload, which may span multiple pbuf pool blocks */
     if (payload != NULL && payload_len > 0) {
         pbuf_take_at(p, payload, payload_len, 14);
     }

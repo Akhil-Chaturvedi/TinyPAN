@@ -248,15 +248,14 @@ void supervisor_process(void) {
                     tinypan_netif_start_dhcp();
 #endif
                 } else {
-                    TINYPAN_LOG_ERROR("DHCP failed after %u attempts. Disconnecting link.", 
+                    /* Layer decoupling: Do NOT tear down the physical L2CAP link just because 
+                     * an application-layer DHCP broadcast timed out. Retry infinitely. */
+                    TINYPAN_LOG_ERROR("DHCP failed after %u attempts. Restarting DHCP cycle.", 
                                       TINYPAN_DHCP_MAX_RETRIES);
-                    hal_bt_l2cap_disconnect();
-                    
-#if TINYPAN_ENABLE_AUTO_RECONNECT
-                    set_state(TINYPAN_STATE_RECONNECTING);
-                    schedule_reconnect();
-#else
-                    set_state(TINYPAN_STATE_ERROR);
+                    s_dhcp_retries = 0;
+                    s_state_enter_time = hal_get_tick_ms();
+#if TINYPAN_ENABLE_LWIP
+                    tinypan_netif_start_dhcp();
 #endif
                 }
             }

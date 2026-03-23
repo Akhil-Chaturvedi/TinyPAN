@@ -29,16 +29,15 @@ The `pbuf` and its associated `tinypan_iovec_t` descriptor array are held in the
 **Dead-Link Protection (Hardening):** In the event of an abrupt L2CAP disconnect where the peer fails to acknowledge in-flight packets, the BNEP transport forcibly reclaims and frees all queued pbufs during the cleanup phase. This prevents pool exhaustion and ensures immediate memory recovery for subsequent connection attempts.
 
 ### SLIP Encoder
-The SLIP transport encodes outgoing `pbuf` chains into a configurable staging buffer (`TINYPAN_SLIP_CHUNK_SIZE`) using a multi-pass scanner based on `memchr()`. This approach leverages hardware-optimized SIMD instructions for frame boundary detection, significantly outperforming manual byte-by-byte loops on bulk IP data. At runtime, the transport queries `hal_bt_l2cap_get_mtu()` and enforces a minimum safety boundary to prevent integer underflows on legacy or fluctuating links. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is acknowledged by the HAL.
+The SLIP transport encodes outgoing `pbuf` chains into a configurable staging buffer (`TINYPAN_SLIP_CHUNK_SIZE`) using a deterministic single-pass C loop. This approach is optimized for compiler auto-vectorization and ensures predictable performance across diverse MCU architectures. At runtime, the transport queries `hal_bt_l2cap_get_mtu()` and enforces a minimum safety boundary to prevent integer underflows. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is transmitted.
 
 ### SLIP Decoder
-Incoming SLIP bytes are accumulated directly into pool-allocated (`PBUF_POOL`) segments via a streaming FSM. A single incoming frame is bounded to 2 pool segments (~3 KB). If a frame exceeds this limit, the FSM enters a `seeking_end` state and pauses pool allocations until a `SLIP_END` delimiter is reached, preventing memory-pool thrashing during error recovery. When a valid frame is completed, the last segment is trimmed with `pbuf_realloc` to the exact data length.
+Incoming SLIP bytes are accumulated directly into a static 1.6 KB accumulator buffer (`s_slip_rx_buf`). Once a `SLIP_END` delimiter is detected, exactly one `pbuf` is allocated from the pool and the frame is passed to lwIP. This deterministic approach eliminates pool fragmentation risks and prevents memory exhaustion during serial stream error recovery.
 
 ### Resource Metrics (Typical 32-bit MCU)
 - **Library BSS/Data:** < 400 bytes (core logic and transport state)
-- **Flash (Text)::** ~12-18 KB, mode dependent
-- **lwIP Heap/Pool:** Configurable; defaults to 4 byte-aligned segments (6.8KB pool) plusStatic RAM cost: Approximately 1.8 KB of BSS for the TX aligned bounce buffer. The RX path is dynamic; the HAL allocates lwIP `pbuf` pool segments directly from the Bluetooth callback task and queues the resulting pointers for the application thread. This eliminates multi-kilobyte static RX buffers and leverages lwIP's native memory management for improved heap efficiency.
-The SLIP transport chunks to BLE MTU; the HAL does not maintain a separate TX buffer.
+- **Flash (Text):** ~12-18 KB (mode dependent)
+- **Memory Model:** The reference HALs (ESP32, Zephyr) use a zero-copy TX path for BNEP and a chunked TX path for SLIP. The RX path is dynamic; the HAL bridges incoming Bluetooth payloads to the application thread using thread-safe structures (`xMessageBuffer` on ESP32, `ring_buf` on Zephyr). This eliminates multi-kilobyte static RX buffers and leverages native stack memory for maximum efficiency.
 
 ## Hardware Abstraction Layer (HAL)
 
@@ -71,7 +70,7 @@ TinyPAN is non-reentrant. All library interactions -- including API calls and HA
 - **Multicast Filtering:** Automatically sent after BNEP setup before DHCP.
 - **DHCP Lifecycle:** Managed by lwIP's DHCP client. TinyPAN implements a soft retry mechanism with exponential backoff (default: 3 attempts) for DHCP discovery timeouts before declaring a link failure. The netif stack is reset on disconnect; TinyPAN monitors the IP address state in the netif callback to handle lease expiration or renewal failures, ensuring the library state machine accurately reflects the network reachability.
 - **State Transition Safety:** Prevents invalid transitions and guarantees state machine consistency.
-- **ESP32 Concurrency:** The reference HAL maintains thread safety on dual-core processors via hardware spinlocks (`portENTER_CRITICAL`) and atomic FreeRTOS pointer queues, ensuring consistent cross-task memory visibility between the Bluetooth stack and application threads.
+- **ESP32 Concurrency:** The reference HAL ensures thread safety on dual-core processors by using a FreeRTOS `xMessageBuffer` for the RX path. This design allows the Bluetooth task to copy incoming data without touching the lwIP heap, completely avoiding the spinlock-induced heap corruption risks inherent in standard multicore stack integrations.
 - **Portability:** Networking header extraction uses safe byte-indexing and respects `ETH_PAD_SIZE` to support unaligned access and Hard Fault prevention on ARM Cortex-M0/M3 targets.
 
 ## License

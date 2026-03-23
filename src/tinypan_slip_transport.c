@@ -3,13 +3,11 @@
  *
  * Implements tinypan_transport_t for BLE SLIP companion mode.
  *
- * TX: Encodes outgoing pbuf chains in-place using a memchr-based bulk copy loop
- * into a 128-byte staging buffer, flushed via hal_bt_l2cap_send(). The original
- * pbuf is held by reference (pbuf_ref) and freed when transmission completes.
+ * TX: Encodes outgoing pbuf chains into a staging buffer using a deterministic
+ * single-pass C loop (auto-vectorization friendly). Flushed via hal_bt_l2cap_send().
  *
- * RX: Accumulates incoming bytes from the HAL into PBUF_POOL segments via a
- * streaming FSM. A single frame is capped at 2 pool segments to prevent pool
- * exhaustion from malformed or incomplete SLIP streams.
+ * RX: Accumulates incoming bytes from the HAL into a static accumulator.
+ * Frame completion triggers a single pbuf_alloc (PBUF_POOL) and pbuf_take.
  */
 
 #include "tinypan_transport.h"
@@ -38,19 +36,10 @@ static void slip_transport_on_connected(void) {
 
 static void slip_transport_on_disconnected(void) {
 #if TINYPAN_ENABLE_LWIP
-    /* Free any partially-assembled inbound frame. If a connection drops mid-frame
-     * (e.g., BLE signal loss after one or two bytes have been received), the
-     * allocated pbuf pool segment would be leaked otherwise. With PBUF_POOL_SIZE=4
-     * this could exhaust the pool after 4 such events. */
-    if (s_slip_rx_pbuf != NULL) {
-        pbuf_free(s_slip_rx_pbuf);
-        s_slip_rx_pbuf = NULL;
-    }
-    s_slip_rx_curr_pbuf   = NULL;
-    s_slip_rx_curr_offset  = 0;
-    s_slip_rx_total_offset = 0;
-    s_slip_rx_seg_count    = 0;
-    s_slip_rx_escape       = false;
+    /* Reset RX framing */
+    s_slip_rx_len = 0;
+    s_slip_rx_escape = false;
+    s_slip_rx_seeking_end = false;
 #endif
 }
 
@@ -78,13 +67,8 @@ static void slip_transport_on_can_send_now(void) {
 
 #if TINYPAN_ENABLE_LWIP
 /* RX State Machine */
-static uint8_t  s_slip_rx_staging_buf[128]; /* Drain small chunks to staging before PBUF allocation */
-static uint8_t  s_slip_rx_staging_len = 0;
-static struct pbuf* s_slip_rx_pbuf = NULL;
-static struct pbuf* s_slip_rx_curr_pbuf = NULL;
-static uint16_t s_slip_rx_curr_offset = 0;
-static uint16_t s_slip_rx_total_offset = 0;
-static uint8_t s_slip_rx_seg_count = 0;
+static uint8_t  s_slip_rx_buf[TINYPAN_RX_BUFFER_SIZE]; /* Static accumulator sized for maximum BNEP MTU */
+static uint16_t s_slip_rx_len = 0;
 static bool s_slip_rx_escape = false;
 static bool s_slip_rx_seeking_end = false;
 
@@ -133,9 +117,7 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
             else if (c == SLIP_ESC_ESC) c = SLIP_ESC;
             else {
                 TINYPAN_LOG_ERROR("slip_rx: Invalid escape sequence");
-                if (s_slip_rx_pbuf) pbuf_free(s_slip_rx_pbuf);
-                s_slip_rx_pbuf = NULL;
-                s_slip_rx_staging_len = 0;
+                s_slip_rx_len = 0;
                 s_slip_rx_seeking_end = true;
                 continue;
             }
@@ -143,83 +125,32 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
             s_slip_rx_escape = true;
             continue;
         } else if (c == SLIP_END) {
-            /* Frame delimiter: flush accumulated data to lwIP */
-            if (s_slip_rx_total_offset + s_slip_rx_staging_len > 0) {
-                if (s_slip_rx_pbuf == NULL) {
-                    /* Small frame fits entirely in staging buffer */
-                    s_slip_rx_pbuf = pbuf_alloc(PBUF_RAW, s_slip_rx_staging_len, PBUF_POOL);
-                    if (s_slip_rx_pbuf) pbuf_take(s_slip_rx_pbuf, s_slip_rx_staging_buf, s_slip_rx_staging_len);
-                } else {
-                    /* Append remaining staging data to pbuf chain */
-                    if (pbuf_take_at(s_slip_rx_pbuf, s_slip_rx_staging_buf, s_slip_rx_staging_len, s_slip_rx_total_offset) != ERR_OK) {
-                        TINYPAN_LOG_ERROR("slip_rx: pbuf_take_at failed, dropping frame");
-                        pbuf_free(s_slip_rx_pbuf);
-                        s_slip_rx_pbuf = NULL;
-                    } else {
-                        pbuf_realloc(s_slip_rx_pbuf, s_slip_rx_total_offset + s_slip_rx_staging_len);
-                    }
-                }
-                
-                if (s_slip_rx_pbuf) {
+            /* Frame delimiter: allocate exactly once and pass to lwIP */
+            if (s_slip_rx_len > 0) {
+                struct pbuf* p = pbuf_alloc(PBUF_RAW, s_slip_rx_len, PBUF_POOL);
+                if (p) {
+                    pbuf_take(p, s_slip_rx_buf, s_slip_rx_len);
                     struct netif* netif = tinypan_netif_get();
-                    if (netif && netif->input(s_slip_rx_pbuf, netif) != ERR_OK) pbuf_free(s_slip_rx_pbuf);
-                    else if (!netif) pbuf_free(s_slip_rx_pbuf);
+                    if (netif && netif->input(p, netif) != ERR_OK) {
+                        pbuf_free(p);
+                    } else if (!netif) {
+                        pbuf_free(p);
+                    }
+                } else {
+                    TINYPAN_LOG_ERROR("slip_rx: pbuf_alloc failed");
                 }
-                s_slip_rx_pbuf = NULL;
-                s_slip_rx_total_offset = 0;
-                s_slip_rx_staging_len = 0;
-                s_slip_rx_seg_count = 0;
+                s_slip_rx_len = 0;
             }
             continue;
         }
 
-        /* Buffer the byte */
-        s_slip_rx_staging_buf[s_slip_rx_staging_len++] = c;
-        
-        /* If staging buffer is full, commit it to a PBUF_POOL segment */
-        if (s_slip_rx_staging_len == sizeof(s_slip_rx_staging_buf)) {
-            if (s_slip_rx_total_offset + s_slip_rx_staging_len > TINYPAN_MAX_FRAME_SIZE) {
-                TINYPAN_LOG_ERROR("slip_rx: Frame too large");
-                if (s_slip_rx_pbuf) pbuf_free(s_slip_rx_pbuf);
-                s_slip_rx_pbuf = NULL;
-                s_slip_rx_staging_len = 0;
-                s_slip_rx_seeking_end = true;
-                continue;
-            }
-
-            if (s_slip_rx_pbuf == NULL) {
-                s_slip_rx_pbuf = pbuf_alloc(PBUF_RAW, PBUF_POOL_BUFSIZE, PBUF_POOL);
-                s_slip_rx_seg_count = 1;
-            } else if (s_slip_rx_total_offset % PBUF_POOL_BUFSIZE == 0) {
-                /* Current segment might be full? Actually pbuf_take_at handles it,
-                 * but we cap segments to prevent DoS. */
-                if (s_slip_rx_seg_count >= 2) {
-                    /* Drop */
-                } else {
-                    struct pbuf* next = pbuf_alloc(PBUF_RAW, PBUF_POOL_BUFSIZE, PBUF_POOL);
-                    if (next) {
-                        pbuf_cat(s_slip_rx_pbuf, next);
-                        s_slip_rx_seg_count++;
-                    }
-                }
-            }
-
-            if (s_slip_rx_pbuf) {
-                if (pbuf_take_at(s_slip_rx_pbuf, s_slip_rx_staging_buf, s_slip_rx_staging_len, s_slip_rx_total_offset) != ERR_OK) {
-                    TINYPAN_LOG_ERROR("slip_rx: pbuf_take_at failed, seeking end");
-                    pbuf_free(s_slip_rx_pbuf);
-                    s_slip_rx_pbuf = NULL;
-                    s_slip_rx_staging_len = 0;
-                    s_slip_rx_seeking_end = true;
-                    continue;
-                }
-                s_slip_rx_total_offset += s_slip_rx_staging_len;
-                s_slip_rx_staging_len = 0;
-            } else {
-                /* OOM */
-                s_slip_rx_staging_len = 0;
-                s_slip_rx_seeking_end = true;
-            }
+        /* Buffer the byte directly */
+        if (s_slip_rx_len < sizeof(s_slip_rx_buf)) {
+            s_slip_rx_buf[s_slip_rx_len++] = c;
+        } else {
+            TINYPAN_LOG_ERROR("slip_rx: Frame too large, dropping");
+            s_slip_rx_len = 0;
+            s_slip_rx_seeking_end = true;
         }
     }
     }
@@ -294,55 +225,24 @@ void slip_transport_drain_tx_queue(void) {
      * throughput should be aware that worst-case payloads will take twice as 
      * long to transmit over the BLE link due to this expansion.
      */
-    /* Optimized Multi-Pass Encoder.
-     * Replaces manual byte-by-byte loop with memchr() and bulk memcpy(). 
-     * memchr() is SIMD-optimized in most libc implementations, significantly 
-     * outperforming manual branching on bulk data. */
+    /* Standard single-pass encoder. Relies on compiler auto-vectorization
+     * which typically outperforms manual double-pass memchr() on small BLE frames. */
     while (s_slip_tx_current != NULL && chunk_idx < max_chunk - 2) {
-        uint8_t* payload = (uint8_t*)s_slip_tx_current->payload + s_slip_tx_offset;
-        uint16_t rem_len = s_slip_tx_current->len - s_slip_tx_offset;
-        uint16_t space = max_chunk - 2 - chunk_idx;
-        uint16_t search_len = (rem_len < space) ? rem_len : space;
+        uint8_t c = *((uint8_t*)s_slip_tx_current->payload + s_slip_tx_offset);
+        if (c == SLIP_END) {
+            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
+            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_END;
+        } else if (c == SLIP_ESC) {
+            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
+            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_ESC;
+        } else {
+            s_slip_chunk_buf[chunk_idx++] = c;
+        }
         
-        if (search_len == 0) {
+        s_slip_tx_offset++;
+        if (s_slip_tx_offset >= s_slip_tx_current->len) {
             s_slip_tx_current = s_slip_tx_current->next;
             s_slip_tx_offset = 0;
-            continue;
-        }
-
-        uint8_t* next_end = memchr(payload, SLIP_END, search_len);
-        uint8_t* next_esc = memchr(payload, SLIP_ESC, search_len);
-        uint8_t* next_target = NULL;
-
-        if (next_end && next_esc) {
-            next_target = (next_end < next_esc) ? next_end : next_esc;
-        } else {
-            next_target = next_end ? next_end : next_esc;
-        }
-
-        if (next_target) {
-            uint16_t bulk_len = (uint16_t)(next_target - payload);
-            if (bulk_len > 0) {
-                memcpy(&s_slip_chunk_buf[chunk_idx], payload, bulk_len);
-                chunk_idx += bulk_len;
-                s_slip_tx_offset += bulk_len;
-            }
-            
-            /* Escape the special character */
-            uint8_t c = *next_target;
-            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
-            s_slip_chunk_buf[chunk_idx++] = (c == SLIP_END) ? SLIP_ESC_END : SLIP_ESC_ESC;
-            s_slip_tx_offset++;
-        } else {
-            /* No characters to escape in the current bulk window */
-            memcpy(&s_slip_chunk_buf[chunk_idx], payload, search_len);
-            chunk_idx += search_len;
-            s_slip_tx_offset += search_len;
-            
-            if (s_slip_tx_offset >= s_slip_tx_current->len) {
-                s_slip_tx_current = s_slip_tx_current->next;
-                s_slip_tx_offset = 0;
-            }
         }
     }
             if (s_slip_tx_current == NULL) {

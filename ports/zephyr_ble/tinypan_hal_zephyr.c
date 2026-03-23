@@ -57,11 +57,9 @@ struct z_event_msg {
 K_MSGQ_DEFINE(s_zephyr_event_q, sizeof(struct z_event_msg), 16, 4);
 
 /* Concurrency: Lock-free Zephyr Ring Buffer replaces K_MUTEX_DEFINE to prevent stalls.
- * Size is increased to 4KB to handle TCP window bursts and prevent overflows
- * during high-throughput transfers if the app thread is busy. */
-/* QA-23: Reduced from 4096 to 512 bytes to save RAM. 4KB was excessive 
- * for a 247-byte MTU link even with TCP windowing. */
-RING_BUF_DECLARE(s_rx_ringbuf, 512);
+ * Size set to 2KB to handle full 1500-byte IP bursts when TCP windowing is active,
+ * protecting against stream corruption when the application thread is pre-empted. */
+RING_BUF_DECLARE(s_rx_ringbuf, 2048);
 
 /* SLIP TX Chunker */
 /* TinyPAN passes ~1500 byte SLIP MTU frames. NUS must chunk them to BLE MTU */
@@ -102,7 +100,7 @@ void hal_bt_poll(void) {
     if (s_current_conn && s_tx_notify_pending) {
         if (k_uptime_get() >= s_tx_retry_time) {
             s_tx_notify_pending = false;
-            /* QA-18: Fire directly to avoid polling-lag jitter */
+            /* Fire directly to minimize latency and polling-lag jitter. */
             if (s_event_cb) {
                 s_event_cb(HAL_L2CAP_EVENT_CAN_SEND_NOW, 0, s_event_cb_data);
             }

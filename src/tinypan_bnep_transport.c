@@ -166,7 +166,8 @@ void bnep_transport_drain_tx_queue(void) {
 #endif
 
         struct pbuf* iter = q;
-        while (iter != NULL && job->iov_count < 16) {
+        uint16_t max_iov = sizeof(job->iov) / sizeof(job->iov[0]);
+        while (iter != NULL && job->iov_count < max_iov) {
             if (iter->len > 0) {
                 if (skip_bytes >= iter->len) {
                     /* Entire pbuf is skipped */
@@ -215,11 +216,11 @@ void bnep_transport_flush_tx_queue(void) {
     while (s_bnep_tx_head != s_bnep_tx_tail) {
         bnep_tx_job_t* job = &s_bnep_tx_queue[s_bnep_tx_head];
         
-        /* Hardening: If the link is still connected, we MUST NOT free an 
-         * in-flight packet as the DMA controller may still be reading it.
-         * HOWEVER, if the link is dead, 'on_tx_complete' will never fire.
-         * Reclaim memory only if the HAL confirms the connection is gone. */
-        if (job->in_flight && hal_bt_l2cap_can_send()) {
+        /* Hardening: We MUST NOT free an in-flight packet during a standard flush
+         * because the hardware DMA controller might still be physically reading it
+         * over the memory bus. If the link is truly dead, the BNEP TX timeout logic
+         * will independently reclaim this memory after waiting for DMA shutdown. */
+        if (job->in_flight) {
             break;
         }
 
