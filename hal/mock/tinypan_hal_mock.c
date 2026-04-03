@@ -20,6 +20,8 @@
 #include <windows.h>
 #else
 #include <sys/time.h>
+#include <pthread.h>
+#include <stdlib.h>
 #endif
 
 /* ============================================================================
@@ -350,6 +352,46 @@ uint32_t hal_bt_get_next_timeout_ms(void) {
 
 uint16_t hal_bt_l2cap_get_mtu(void) {
     return 1500;
+}
+
+hal_mutex_t hal_mutex_create(void) {
+#ifdef _WIN32
+    CRITICAL_SECTION* cs = (CRITICAL_SECTION*)malloc(sizeof(CRITICAL_SECTION));
+    if (cs) InitializeCriticalSection(cs);
+    return (hal_mutex_t)cs;
+#else
+    pthread_mutex_t* mutex = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t));
+    if (mutex) pthread_mutex_init(mutex, NULL);
+    return (hal_mutex_t)mutex;
+#endif
+}
+
+void hal_mutex_lock(hal_mutex_t mutex) {
+    if (!mutex) return;
+#ifdef _WIN32
+    EnterCriticalSection((CRITICAL_SECTION*)mutex);
+#else
+    pthread_mutex_lock((pthread_mutex_t*)mutex);
+#endif
+}
+
+void hal_mutex_unlock(hal_mutex_t mutex) {
+    if (!mutex) return;
+#ifdef _WIN32
+    LeaveCriticalSection((CRITICAL_SECTION*)mutex);
+#else
+    pthread_mutex_unlock((pthread_mutex_t*)mutex);
+#endif
+}
+
+void hal_mutex_destroy(hal_mutex_t mutex) {
+    if (!mutex) return;
+#ifdef _WIN32
+    DeleteCriticalSection((CRITICAL_SECTION*)mutex);
+#else
+    pthread_mutex_destroy((pthread_mutex_t*)mutex);
+#endif
+    free(mutex);
 }
 
 const uint8_t* mock_hal_get_last_tx_data(void) {

@@ -3,8 +3,8 @@
  *
  * Implements tinypan_transport_t for BLE SLIP companion mode.
  *
- * TX: Encodes outgoing pbuf chains into a staging buffer using a deterministic
- * single-pass C loop (auto-vectorization friendly). Flushed via hal_bt_l2cap_send().
+ * TX: Encodes outgoing pbuf chains into a staging buffer using an efficient
+ * single-pass C loop. Flushed via hal_bt_l2cap_send().
  *
  * RX: Accumulates incoming bytes from the HAL into a static accumulator.
  * Frame completion triggers a single pbuf_alloc (PBUF_POOL) and pbuf_take.
@@ -27,7 +27,10 @@
 #include <string.h>
 
 static int slip_transport_init(void) {
-    return 0; /* SLIP is stateless at this level */
+    if (s_slip_tx_mutex == NULL) {
+        s_slip_tx_mutex = hal_mutex_create();
+    }
+    return 0;
 }
 
 static void slip_transport_on_connected(void) {
@@ -76,6 +79,7 @@ static bool s_slip_rx_seeking_end = false;
 static struct pbuf* s_slip_tx_queue[TINYPAN_TX_QUEUE_LEN] = {0};
 static uint8_t s_slip_tx_head = 0;
 static uint8_t s_slip_tx_tail = 0;
+static hal_mutex_t s_slip_tx_mutex = NULL;
 
 /* Fits a standard 247-byte BLE 4.2+ Data Length Extension MTU without
  * artificially fragmenting it and causing extra RTOS context switches */
@@ -163,11 +167,16 @@ static void slip_transport_handle_incoming(const uint8_t* data, uint16_t len) {
 #if TINYPAN_ENABLE_LWIP
 
 void slip_transport_drain_tx_queue(void) {
-    if (s_slip_tx_head == s_slip_tx_tail) return;
+    hal_mutex_lock(s_slip_tx_mutex);
+    if (s_slip_tx_head == s_slip_tx_tail) {
+        hal_mutex_unlock(s_slip_tx_mutex);
+        return;
+    }
 
     while (s_slip_tx_head != s_slip_tx_tail) {
         if (!hal_bt_l2cap_can_send()) {
             hal_bt_l2cap_request_can_send_now();
+            hal_mutex_unlock(s_slip_tx_mutex);
             break;
         }
 
@@ -176,6 +185,7 @@ void slip_transport_drain_tx_queue(void) {
             int result = hal_bt_l2cap_send(s_slip_chunk_buf, s_slip_chunk_len);
             if (result > 0) {
                 hal_bt_l2cap_request_can_send_now();
+                hal_mutex_unlock(s_slip_tx_mutex);
                 break;
             } else if (result < 0) {
                 /* Hard error, drop packet */
@@ -225,8 +235,8 @@ void slip_transport_drain_tx_queue(void) {
      * throughput should be aware that worst-case payloads will take twice as 
      * long to transmit over the BLE link due to this expansion.
      */
-    /* Standard single-pass encoder. Relies on compiler auto-vectorization
-     * which typically outperforms manual double-pass memchr() on small BLE frames. */
+    /* Efficient single-pass encoder. Relies on compiler optimization
+     * of branch patterns for small BLE frames. */
     while (s_slip_tx_current != NULL && chunk_idx < max_chunk - 2) {
         uint8_t c = *((uint8_t*)s_slip_tx_current->payload + s_slip_tx_offset);
         if (c == SLIP_END) {
@@ -261,6 +271,7 @@ void slip_transport_drain_tx_queue(void) {
             int result = hal_bt_l2cap_send(s_slip_chunk_buf, s_slip_chunk_len);
             if (result > 0) {
                 hal_bt_l2cap_request_can_send_now();
+                hal_mutex_unlock(s_slip_tx_mutex);
                 break;
             } else if (result < 0) {
                 s_slip_chunk_len = 0;
@@ -280,9 +291,15 @@ drop_packet:
             s_slip_chunk_len = 0;
         }
     }
+    hal_mutex_unlock(s_slip_tx_mutex);
+}
+
+static void slip_transport_process(void) {
+    /* Maintenance hook for future use (e.g. flow control timeouts) */
 }
 
 void slip_transport_flush_tx_queue(void) {
+    hal_mutex_lock(s_slip_tx_mutex);
     while (s_slip_tx_head != s_slip_tx_tail) {
         if (s_slip_tx_queue[s_slip_tx_head] != NULL) {
             pbuf_free(s_slip_tx_queue[s_slip_tx_head]);
@@ -294,6 +311,7 @@ void slip_transport_flush_tx_queue(void) {
     s_slip_tx_offset = 0;
     s_slip_tx_state = 0;
     s_slip_chunk_len = 0;
+    hal_mutex_unlock(s_slip_tx_mutex);
 }
 
 static int slip_transport_output(struct netif* netif, struct pbuf* p) {
@@ -306,13 +324,16 @@ static int slip_transport_output(struct netif* netif, struct pbuf* p) {
     struct pbuf* q = p;
 
     uint8_t next_tail = (s_slip_tx_tail + 1) % TINYPAN_TX_QUEUE_LEN;
+    hal_mutex_lock(s_slip_tx_mutex);
     if (next_tail == s_slip_tx_head) {
+        hal_mutex_unlock(s_slip_tx_mutex);
         pbuf_free(q);
         return ERR_MEM;
     }
 
     s_slip_tx_queue[s_slip_tx_tail] = q;
     s_slip_tx_tail = next_tail;
+    hal_mutex_unlock(s_slip_tx_mutex);
     
     /* Kick TX engine */
     slip_transport_drain_tx_queue();
@@ -332,6 +353,7 @@ const tinypan_transport_t transport_slip = {
     .retry_setup = slip_transport_retry_setup,
     .on_can_send_now = slip_transport_on_can_send_now,
     .flush_queues = slip_transport_flush_tx_queue,
+    .process = slip_transport_process,
 #if TINYPAN_ENABLE_LWIP
     .output = slip_transport_output
 #endif

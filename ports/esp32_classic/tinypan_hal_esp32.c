@@ -11,9 +11,9 @@
  * The ESP-IDF Bluetooth stack executes all callbacks (e.g. `esp_l2cap_cb`)
  * on a dedicated internal FreeRTOS task (`btu_task`). TinyPAN is strictly
  * single-threaded. Incoming data is bridged to the application thread via
- * a dynamic pbuf pointer queue (`s_rx_queue`). Events (connect/disconnect)
- * are bridged via a small FreeRTOS event queue. Memory barriers and critical
- * sections guard head/tail updates for correct multi-core visibility.
+ * are bridged via a small FreeRTOS event queue. The library uses the 
+ * hal_mutex_x API (implemented here via FreeRTOS semaphores) to ensure 
+ * transport queue integrity across task boundaries.
  */
 
 #include "tinypan_hal.h"
@@ -22,6 +22,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/message_buffer.h>
+#include <freertos/semphr.h>
 #include <esp_log.h>
 #include <esp_bt.h>
 #include <esp_bt_main.h>
@@ -425,4 +426,20 @@ uint32_t hal_bt_get_next_timeout_ms(void) {
 
 uint16_t hal_bt_l2cap_get_mtu(void) {
     return TINYPAN_L2CAP_MTU;
+}
+
+hal_mutex_t hal_mutex_create(void) {
+    return (hal_mutex_t)xSemaphoreCreateMutex();
+}
+
+void hal_mutex_lock(hal_mutex_t mutex) {
+    if (mutex) xSemaphoreTake((SemaphoreHandle_t)mutex, portMAX_DELAY);
+}
+
+void hal_mutex_unlock(hal_mutex_t mutex) {
+    if (mutex) xSemaphoreGive((SemaphoreHandle_t)mutex);
+}
+
+void hal_mutex_destroy(hal_mutex_t mutex) {
+    if (mutex) vSemaphoreDelete((SemaphoreHandle_t)mutex);
 }

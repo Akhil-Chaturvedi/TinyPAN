@@ -262,6 +262,40 @@ uint32_t hal_bt_get_next_timeout_ms(void);
  */
 uint16_t hal_bt_l2cap_get_mtu(void);
 
+/* ============================================================================
+ * Thread Synchronization API
+ * 
+ * Required for RTOS environments (NO_SYS=0) where lwIP calls linkoutput()
+ * from a different thread context than the main tinypan_process() loop.
+ * ============================================================================ */
+
+/** Opaque handle for a HAL-provided mutex */
+typedef void* hal_mutex_t;
+
+/**
+ * @brief Create a new mutex
+ * @return Handle to the mutex, or NULL on failure
+ */
+hal_mutex_t hal_mutex_create(void);
+
+/**
+ * @brief Acquire a mutex (blocking)
+ * @param mutex Mutex handle
+ */
+void hal_mutex_lock(hal_mutex_t mutex);
+
+/**
+ * @brief Release a mutex
+ * @param mutex Mutex handle
+ */
+void hal_mutex_unlock(hal_mutex_t mutex);
+
+/**
+ * @brief Destroy a mutex
+ * @param mutex Mutex handle
+ */
+void hal_mutex_destroy(hal_mutex_t mutex);
+
 
 #ifdef __cplusplus
 }

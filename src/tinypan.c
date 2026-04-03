@@ -207,6 +207,12 @@ void tinypan_process(void) {
     /* Process connection supervisor */
     supervisor_process();
 
+    /* Process active transport maintenance (timeouts, GC) */
+    const tinypan_transport_t* transport = tinypan_transport_get();
+    if (transport && transport->process) {
+        transport->process();
+    }
+
     tinypan_state_t current_state = supervisor_get_state();
     if (current_state != s_last_reported_state) {
         s_last_reported_state = current_state;

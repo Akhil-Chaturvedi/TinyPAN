@@ -49,7 +49,7 @@ static bnep_filter_response_callback_t s_filter_response_callback = NULL;
 static void* s_filter_response_callback_user_data = NULL;
 
 /** Control packet queue sizing */
-#define BNEP_CONTROL_QUEUE_LEN  10
+#define BNEP_CONTROL_QUEUE_LEN  4
 #define BNEP_CONTROL_MAX_LEN    64
 
 typedef struct {
@@ -346,13 +346,16 @@ int bnep_parse_ethernet_frame(const uint8_t* data, uint16_t len,
         }
         uint8_t ext_type = data[ext_offset];
         uint8_t ext_len = data[ext_offset + 1];
+        
+        /* Strict Bounds Check: Ensure the extension length doesn't overflow the packet 
+         * before we perform the addition, preventing potential OOB reads. */
+        if (ext_offset + 2 + ext_len > len) {
+            TINYPAN_LOG_WARN("BNEP extension header length exceeds packet size");
+            return -1;
+        }
+
         has_ext = (ext_type & BNEP_EXT_HEADER_FLAG) != 0;
         ext_offset += 2 + ext_len;
-    }
-    
-    if (ext_offset > len) {
-        TINYPAN_LOG_WARN("BNEP extension payload exceeds packet length");
-        return -1;
     }
     
     switch (pkt_type) {
@@ -775,13 +778,14 @@ void bnep_handle_incoming(const uint8_t* data, uint16_t len) {
         }
         uint8_t ext_type = data[ext_offset];
         uint8_t ext_len = data[ext_offset + 1];
+        
+        if (ext_offset + 2 + ext_len > len) {
+            TINYPAN_LOG_WARN("BNEP extension length exceeds packet size");
+            return;
+        }
+
         has_ext = (ext_type & BNEP_EXT_HEADER_FLAG) != 0;
         ext_offset += 2 + ext_len;
-    }
-
-    if (ext_offset > len) {
-        TINYPAN_LOG_WARN("BNEP extensions exceed packet length");
-        return;
     }
 
     switch (pkt_type) {

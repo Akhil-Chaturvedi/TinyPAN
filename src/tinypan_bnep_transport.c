@@ -30,6 +30,8 @@
 extern void supervisor_on_bnep_setup_response(uint16_t response_code);
 extern void supervisor_on_bnep_filter_response(uint16_t response_code);
 
+static hal_mutex_t s_bnep_tx_mutex = NULL;
+
 static void bnep_transport_frame_cb(const bnep_ethernet_frame_t* frame, void* user_data) {
     (void)user_data;
     TINYPAN_LOG_DEBUG("transport_bnep: Received frame type=0x%04X len=%u",
@@ -58,6 +60,12 @@ static int bnep_transport_init(void) {
     bnep_register_frame_callback(bnep_transport_frame_cb, NULL);
     bnep_register_setup_response_callback(bnep_transport_setup_response_cb, NULL);
     bnep_register_filter_response_callback(bnep_transport_filter_response_cb, NULL);
+    
+#if TINYPAN_ENABLE_LWIP
+    if (s_bnep_tx_mutex == NULL) {
+        s_bnep_tx_mutex = hal_mutex_create();
+    }
+#endif
     
     const tinypan_config_t* config = tinypan_internal_get_config();
     if (config) {
@@ -97,6 +105,7 @@ static void bnep_transport_on_can_send_now(void) {
 #endif
 }
 
+
 #if TINYPAN_ENABLE_LWIP
 
 /* TX Queue: stores unmodified pbufs alongside their synthesized BNEP headers */
@@ -116,11 +125,17 @@ static uint8_t s_bnep_tx_tail = 0;
 
 /* Must be exposed to drain the BNEP tx queue */
 void bnep_transport_drain_tx_queue(void) {
+    hal_mutex_lock(s_bnep_tx_mutex);
+    
     if (!bnep_drain_control_tx_queue()) {
+        hal_mutex_unlock(s_bnep_tx_mutex);
         return;
     }
     
-    if (s_bnep_tx_head == s_bnep_tx_tail) return;
+    if (s_bnep_tx_head == s_bnep_tx_tail) {
+        hal_mutex_unlock(s_bnep_tx_mutex);
+        return;
+    }
     
     while (s_bnep_tx_head != s_bnep_tx_tail) {
         if (!hal_bt_l2cap_can_send()) {
@@ -210,9 +225,33 @@ void bnep_transport_drain_tx_queue(void) {
             pbuf_free(q);
         }
     }
+    
+    hal_mutex_unlock(s_bnep_tx_mutex);
+}
+
+static void bnep_transport_process(void) {
+    /* Autonomous Garbage Collection: Reclaim timed-out pbufs even if no new traffic is arriving.
+     * This prevents resource leaks if the hardware link stalls after enqueuing a packet. */
+    hal_mutex_lock(s_bnep_tx_mutex);
+    if (s_bnep_tx_head != s_bnep_tx_tail) {
+        bnep_tx_job_t* job = &s_bnep_tx_queue[s_bnep_tx_head];
+        if (job->in_flight) {
+            uint32_t now = hal_get_tick_ms();
+            if (now - job->sent_at_ms > TINYPAN_BNEP_TX_TIMEOUT_MS) {
+                TINYPAN_LOG_ERROR("transport_bnep: TX cleanup timeout (job=%p)", (void*)job);
+                struct pbuf* q = job->p;
+                job->p = NULL;
+                job->in_flight = false;
+                s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
+                if (q) pbuf_free(q);
+            }
+        }
+    }
+    hal_mutex_unlock(s_bnep_tx_mutex);
 }
 
 void bnep_transport_flush_tx_queue(void) {
+    hal_mutex_lock(s_bnep_tx_mutex);
     while (s_bnep_tx_head != s_bnep_tx_tail) {
         bnep_tx_job_t* job = &s_bnep_tx_queue[s_bnep_tx_head];
         
@@ -231,9 +270,11 @@ void bnep_transport_flush_tx_queue(void) {
         job->in_flight = false;
         s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
     }
+    hal_mutex_unlock(s_bnep_tx_mutex);
 }
 
 static void bnep_transport_on_tx_complete(void) {
+    hal_mutex_lock(s_bnep_tx_mutex);
     if (s_bnep_tx_head != s_bnep_tx_tail) {
         bnep_tx_job_t* job = &s_bnep_tx_queue[s_bnep_tx_head];
         if (job->in_flight) {
@@ -244,9 +285,12 @@ static void bnep_transport_on_tx_complete(void) {
             if (q) pbuf_free(q);
             
             /* Process next packet */
+            hal_mutex_unlock(s_bnep_tx_mutex);
             bnep_transport_drain_tx_queue();
+            return;
         }
     }
+    hal_mutex_unlock(s_bnep_tx_mutex);
 }
 
 static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
@@ -257,10 +301,12 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
         return ERR_CONN;
     }
     
-    /* True Zero-Copy BNEP TX Path via `iovec`.
+    /* BNEP iovec Architecture (Zero-Copy Ready).
      * Instead of mutating the shared pbuf using pbuf_header(), we synthesize
      * the BNEP header locally in the queue struct, and pass it directly into
-     * iov[0] while the remaining pbuf segments map to iov[1..N]. */
+     * iov[0] while the remaining pbuf segments map to iov[1..N]. This 
+     * architecture enables hardware-level zero-copy on HALs that support 
+     * scatter-gather DMA. */
 
     /* Read Ethernet header via safe byte indexing to avoid unaligned access faults
      * on architectures that do not support non-word-aligned pointers (e.g. ARM Cortex-M0).
@@ -277,9 +323,11 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
     uint8_t bnep_hdr_len = bnep_get_ethernet_header_len(dst_addr, src_addr);
 
     /* Enqueue the job */
+    hal_mutex_lock(s_bnep_tx_mutex);
     uint8_t next_tail = (s_bnep_tx_tail + 1) % TINYPAN_TX_QUEUE_LEN;
     if (next_tail == s_bnep_tx_head) {
         /* Queue full, report backpressure */
+        hal_mutex_unlock(s_bnep_tx_mutex);
         return ERR_MEM;
     }
     
@@ -292,6 +340,7 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
     bnep_write_ethernet_header(job->hdr, bnep_hdr_len, dst_addr, src_addr, ethertype);
     
     s_bnep_tx_tail = next_tail;
+    hal_mutex_unlock(s_bnep_tx_mutex);
 
     /* Signal the HAL. The application polling thread will drain the queue
      * via bnep_transport_drain_tx_queue() on the next CAN_SEND_NOW event. */
@@ -312,6 +361,7 @@ const tinypan_transport_t transport_bnep = {
     .on_can_send_now = bnep_transport_on_can_send_now,
     .on_tx_complete = bnep_transport_on_tx_complete,
     .flush_queues = bnep_transport_flush_tx_queue,
+    .process = bnep_transport_process,
 #if TINYPAN_ENABLE_LWIP
     .output = bnep_transport_output
 #endif

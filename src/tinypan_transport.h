@@ -69,10 +69,11 @@ typedef struct {
      */
     void (*on_tx_complete)(void);
     
-    /**
-     * @brief Clear and free any pending TX queues (e.g. on disconnect)
-     */
+    /** Flush all pending TX packets (e.g. on disconnect) */
     void (*flush_queues)(void);
+
+    /** Periodic maintenance task (timeouts, GC, etc.) */
+    void (*process)(void);
     
 #if TINYPAN_ENABLE_LWIP
     /**

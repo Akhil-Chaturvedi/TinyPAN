@@ -9,8 +9,9 @@
  * 
  * @note Thread Safety
  * Zephyr's Bluetooth RX callbacks occur in the system workqueue or BT RX
- * thread context. Like the ESP-IDF port, we must safely bounce these events 
- * to the thread calling `tinypan_process()` using `k_msgq` (Message Queues).
+ * like the ESP-IDF port, we must safely bounce these events 
+ * to the thread calling `tinypan_process()` using `k_msgq` (Message Queues)
+ * and protect shared transport state using the hal_mutex_x API.
  */
 
 #include "tinypan_hal.h"
@@ -23,6 +24,9 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/services/nus.h>
 #include <zephyr/sys/ring_buffer.h>
+#include <zephyr/bluetooth/l2cap.h>
+#include <zephyr/sys/util.h>
+#include <stdlib.h>
 
 #include <string.h>
 
@@ -308,6 +312,23 @@ uint32_t hal_bt_get_next_timeout_ms(void) {
 }
 
 uint16_t hal_bt_l2cap_get_mtu(void) {
-    if (!s_current_conn) return 23; /* GATT Base MTU */
-    return bt_gatt_get_mtu(s_current_conn) - 3; /* GATT Overhead */
+    return 1600; /* Limit to standard IP burst */
+}
+
+hal_mutex_t hal_mutex_create(void) {
+    struct k_mutex* mutex = malloc(sizeof(struct k_mutex));
+    if (mutex) k_mutex_init(mutex);
+    return (hal_mutex_t)mutex;
+}
+
+void hal_mutex_lock(hal_mutex_t mutex) {
+    if (mutex) k_mutex_lock((struct k_mutex*)mutex, K_FOREVER);
+}
+
+void hal_mutex_unlock(hal_mutex_t mutex) {
+    if (mutex) k_mutex_unlock((struct k_mutex*)mutex);
+}
+
+void hal_mutex_destroy(hal_mutex_t mutex) {
+    if (mutex) free(mutex);
 }
