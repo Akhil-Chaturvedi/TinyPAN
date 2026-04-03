@@ -362,9 +362,9 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
 
 int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
     /* Architectural Note: Bluedroid's `esp_bt_l2cap_data_write` requires a 
-     * contiguous buffer. We bounce the BNEP iovec into a static aligned buffer 
-     * here. While this adds a copy on ESP32, the transport layer provides 
-     * zero-copy capability for DMA-native BLE stacks (e.g. nRF52). */
+     * contiguous buffer. We copy the BNEP iovec into a static aligned buffer 
+     * here. While this is NOT zero-copy on ESP32, the transport layer provides 
+     * the infrastructure for DMA-native BLE/BT stacks (e.g. nRF52). */
     portENTER_CRITICAL(&s_state_spinlock);
     uint32_t handle = s_l2cap_handle;
     bool connected = s_is_connected;

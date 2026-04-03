@@ -46,7 +46,7 @@ static void slip_transport_on_disconnected(void) {
 }
 
 #if TINYPAN_ENABLE_LWIP
-/* Hardened configuration guard: prevent integer underflow bombs in chunking loop */
+/* Configuration guard: prevent integer underflow in chunking loop */
 _Static_assert(TINYPAN_SLIP_CHUNK_SIZE >= 4, "TINYPAN_SLIP_CHUNK_SIZE must be at least 4 bytes");
 #endif
 
@@ -56,7 +56,6 @@ static void slip_transport_retry_setup(void) {
 
 static void slip_transport_on_can_send_now(void) {
 #if TINYPAN_ENABLE_LWIP
-    void slip_transport_drain_tx_queue(void);
     slip_transport_drain_tx_queue();
 #endif
 }
@@ -182,12 +181,9 @@ void slip_transport_drain_tx_queue(void) {
         /* If we have a pending chunk from a previous busy state, try sending it first */
         if (s_slip_chunk_len > 0) {
             int result = hal_bt_l2cap_send(s_slip_chunk_buf, s_slip_chunk_len);
-            if (result > 0) {
-                hal_bt_l2cap_request_can_send_now();
-                hal_mutex_unlock(s_slip_tx_mutex);
-                break;
             } else if (result < 0) {
-                /* Hard error, drop packet */
+                /* Hard error, drop packet and log */
+                TINYPAN_LOG_ERROR("slip_tx: HAL send failed (%d), dropping packet", result);
                 s_slip_chunk_len = 0;
                 goto drop_packet;
             }
@@ -234,21 +230,35 @@ void slip_transport_drain_tx_queue(void) {
      * throughput should be aware that worst-case payloads will take twice as 
      * long to transmit over the BLE link due to this expansion.
      */
-    /* Efficient single-pass encoder. Relies on compiler optimization
-     * of branch patterns for small BLE frames. */
+    /* Efficient single-pass encoder using direct pointer traversal. */
     while (s_slip_tx_current != NULL && chunk_idx < max_chunk - 2) {
-        uint8_t c = *((uint8_t*)s_slip_tx_current->payload + s_slip_tx_offset);
-        if (c == SLIP_END) {
-            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
-            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_END;
-        } else if (c == SLIP_ESC) {
-            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
-            s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_ESC;
-        } else {
-            s_slip_chunk_buf[chunk_idx++] = c;
+        /* Skip zero-length pbufs in the chain (valid in lwIP) */
+        if (s_slip_tx_current->len == 0) {
+            s_slip_tx_current = s_slip_tx_current->next;
+            s_slip_tx_offset = 0;
+            continue;
         }
-        
-        s_slip_tx_offset++;
+
+        const uint8_t* payload_ptr = (const uint8_t*)s_slip_tx_current->payload + s_slip_tx_offset;
+        uint16_t remaining_in_pbuf = s_slip_tx_current->len - s_slip_tx_offset;
+
+        while (remaining_in_pbuf > 0 && chunk_idx < max_chunk - 2) {
+            uint8_t c = *payload_ptr;
+            if (c == SLIP_END) {
+                s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
+                s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_END;
+            } else if (c == SLIP_ESC) {
+                s_slip_chunk_buf[chunk_idx++] = SLIP_ESC;
+                s_slip_chunk_buf[chunk_idx++] = SLIP_ESC_ESC;
+            } else {
+                s_slip_chunk_buf[chunk_idx++] = c;
+            }
+            
+            payload_ptr++;
+            s_slip_tx_offset++;
+            remaining_in_pbuf--;
+        }
+
         if (s_slip_tx_offset >= s_slip_tx_current->len) {
             s_slip_tx_current = s_slip_tx_current->next;
             s_slip_tx_offset = 0;

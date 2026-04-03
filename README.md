@@ -10,8 +10,8 @@ TinyPAN supports two primary modes of operation, configured via `TINYPAN_USE_BLE
 Targeted at dual-mode Bluetooth controllers (e.g., original ESP32).
 
 *   **Stack:** lwIP -> BNEP -> L2CAP (Classic)
-*   **Resilient BNEP Transport:** Implements a state-safe BNEP client with robust control-packet handling and multicast filtering.
-*   **Architectural Zero-Copy Ready:** Designed for zero-copy TX via scatter-gather mapping (requires HAL DMA support).
+*   **BNEP Transport:** Implements a state-safe BNEP client with control-packet handling and multicast filtering.
+*   **Architectural Zero-Copy Ready:** Designed for zero-copy TX via scatter-gather mapping (requires HAL DMA support; reference HALs may use fallback copying).
 *   **Compatibility:** Standard iOS/Android Personal Hotspot. No custom host-side software required.
 
 ### Mode B: BLE SLIP Bridge
@@ -28,7 +28,7 @@ The BNEP transport (`tinypan_bnep_transport.c`) implements zero-copy for IP payl
 
 The `pbuf` and its associated `tinypan_iovec_t` descriptor array are held in the static transport job queue until the HAL fires `HAL_L2CAP_EVENT_TX_COMPLETE`. This ensures that even on true DMA implementations where the hardware reads descriptors asynchronously, the memory remains valid and immutable until the radio signals completion. Only one frame is in-flight at a time. 
 
-**Dead-Link Protection (Hardening):** TinyPAN implements strict DMA safety. If an asynchronous transmission times out at the BNEP layer (e.g., hardware stall), the library forcibly tears down the L2CAP link to safely cancel hardware state before reclaiming pbufs. This prevents DMA use-after-free conditions common in multi-threaded RTOS stacks.
+**Link Protection (Hardening):** TinyPAN implements link-loss protection strategies. If an asynchronous transmission times out at the BNEP layer (e.g., hardware stall), the library forcibly tears down the L2CAP link to request hardware state cancellation before reclaiming pbufs. This helps mitigate potential DMA use-after-free conditions in multi-threaded RTOS stacks.
 
 ### SLIP Encoder
 The SLIP transport encodes outgoing `pbuf` chains into a configurable staging buffer (`TINYPAN_SLIP_CHUNK_SIZE`) using a structural single-pass C loop. This approach is optimized for compiler throughput and ensures predictable performance across diverse MCU architectures. At runtime, the transport queries `hal_bt_l2cap_get_mtu()` and enforces a minimum safety boundary to prevent integer underflows. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is transmitted.

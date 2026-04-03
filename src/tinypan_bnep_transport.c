@@ -2,7 +2,7 @@
  * TinyPAN BNEP Transport Backend
  *
  * Implements tinypan_transport_t for Bluetooth Classic BNEP mode.
- * Optimized for zero-copy transmission via scatter-gather iovec mapping,
+ * Designed for zero-copy transmission via scatter-gather iovec mapping,
  * separating the synthesized BNEP header from the original pbuf payload.
  */
 
@@ -221,7 +221,9 @@ void bnep_transport_drain_tx_queue(void) {
             TINYPAN_LOG_ERROR("transport_bnep: PBUF chain too long for iovec");
             result = -1;
         } else {
+            hal_mutex_unlock(s_bnep_tx_mutex);
             result = hal_bt_l2cap_send_iovec(job->iov, job->iov_count);
+            hal_mutex_lock(s_bnep_tx_mutex);
         }
         
         if (result == 0) {
@@ -245,7 +247,7 @@ void bnep_transport_drain_tx_queue(void) {
 }
 
 static void bnep_transport_process(void) {
-    /* Autonomous Garbage Collection: Reclaim timed-out pbufs even if no new traffic is arriving.
+    /* Periodic Garbage Collection: Reclaim timed-out pbufs even if no new traffic is arriving.
      * This prevents resource leaks if the hardware link stalls after enqueuing a packet. */
     hal_mutex_lock(s_bnep_tx_mutex);
     if (s_bnep_tx_head != s_bnep_tx_tail) {
@@ -257,10 +259,18 @@ static void bnep_transport_process(void) {
                 struct pbuf* q = job->p;
                 job->p = NULL;
                 job->in_flight = false;
-                /* Hardware/Link stall detected. Disconnect to prevent DMA race.
-                 * This cancellation is fatal to the current connection but ensures 
-                 * memory safety for the system. */
+                /* Hardware/Link stall detected. Disconnect to request link termination.
+                 * Note: While this requests the Bluetooth controller to tear down the link,
+                 * it may not instantly stop an active DMA transfer. Advancing the queue
+                 * and freeing the buffer is still a potential race condition on some silicon,
+                 * but necessary to avoid permanent system stall. */
                 hal_bt_l2cap_disconnect();
+                
+                /* CRITICAL: Advance ring buffer head!
+                 * Previous implementation forgot this, causing a NULL dereference in
+                 * subsequent drain_tx_queue passes. */
+                s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
+                
                 if (q) pbuf_free(q);
             }
         }

@@ -240,9 +240,25 @@ int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {
 }
 
 int hal_bt_l2cap_send_iovec(const tinypan_iovec_t* iov, uint16_t iov_count) {
-    (void)iov;
-    (void)iov_count;
-    return -1;
+    if (!s_current_conn) return -1;
+    
+    /* Zephyr NUS doesn't have a native scatter-gather API.
+     * We must bounce into a contiguous buffer. This is NOT zero-copy,
+     * but it implements the HAL interface required for BNEP mode. */
+    static uint8_t s_tx_bounce_buf[TINYPAN_L2CAP_MTU + 32];
+    uint16_t total_len = 0;
+    
+    for (uint16_t i = 0; i < iov_count; i++) {
+        if (total_len + iov[i].iov_len > sizeof(s_tx_bounce_buf)) return -1;
+        memcpy(&s_tx_bounce_buf[total_len], iov[i].iov_base, iov[i].iov_len);
+        total_len += iov[i].iov_len;
+    }
+    
+    int err = bt_nus_send(s_current_conn, s_tx_bounce_buf, total_len);
+    if (err == -ENOMEM) return 1;
+    else if (err < 0) return -1;
+    
+    return 0;
 }
 
 void hal_get_local_bd_addr(uint8_t addr[HAL_BD_ADDR_LEN]) {
