@@ -183,7 +183,7 @@
 /**
  * Auto-assign a static IP Address when the SLIP link connects.
  * Since SLIP (Raw P2P) disables DHCP, this simplifies developer workflows by
- * instantly configuring the lwIP routing table upon BLE tunnel establishment.
+ * automatically configuring the lwIP routing table upon BLE tunnel establishment.
  */
 #ifndef TINYPAN_SLIP_AUTO_IP
 #define TINYPAN_SLIP_AUTO_IP                1

@@ -71,6 +71,10 @@ static int bnep_transport_init(void) {
     if (config) {
         uint8_t local_addr[6];
         hal_get_local_bd_addr(local_addr);
+        /* Apply Locally Administered Bit (0x02) to match lwIP netif MAC.
+         * This ensures the BNEP header compression check (memcmp with src_addr) 
+         * evaluates to true, as lwIP flips this bit for its virtual interface. */
+        local_addr[0] |= 0x02;
         bnep_set_local_addr(local_addr);
         bnep_set_remote_addr(config->remote_addr);
     }
@@ -156,9 +160,11 @@ void bnep_transport_drain_tx_queue(void) {
                 struct pbuf* q = job->p;
                 job->p = NULL;
                 job->in_flight = false;
-                s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
+                /* FATAL: We cannot just slide the queue forward on a DMA timeout. 
+                 * We must tear down the entire link to safely cancel the hardware state. */
+                hal_bt_l2cap_disconnect();
                 if (q) pbuf_free(q);
-                continue; /* Try sending the next packet in the queue */
+                return; /* Stop draining until reconnection */
             }
             break; /* Packet still legitimately in flight */
         }
@@ -242,7 +248,10 @@ static void bnep_transport_process(void) {
                 struct pbuf* q = job->p;
                 job->p = NULL;
                 job->in_flight = false;
-                s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
+                /* Hardware/Link stall detected. Disconnect to prevent DMA race.
+                 * This cancellation is fatal to the current connection but ensures 
+                 * memory safety for the system. */
+                hal_bt_l2cap_disconnect();
                 if (q) pbuf_free(q);
             }
         }
@@ -301,12 +310,12 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
         return ERR_CONN;
     }
     
-    /* BNEP iovec Architecture (Zero-Copy Ready).
+     * BNEP iovec Architecture (Structural Zero-Copy).
      * Instead of mutating the shared pbuf using pbuf_header(), we synthesize
      * the BNEP header locally in the queue struct, and pass it directly into
      * iov[0] while the remaining pbuf segments map to iov[1..N]. This 
-     * architecture enables hardware-level zero-copy on HALs that support 
-     * scatter-gather DMA. */
+     * architecture supports hardware-level zero-copy on HALs that implement 
+     * scatter-gather DMA.
 
     /* Read Ethernet header via safe byte indexing to avoid unaligned access faults
      * on architectures that do not support non-word-aligned pointers (e.g. ARM Cortex-M0).

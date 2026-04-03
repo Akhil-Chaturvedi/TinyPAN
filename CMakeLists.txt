@@ -8,13 +8,12 @@
 #
 # DO NOT use this build file to integrate TinyPAN into a target RTOS project:
 #
-#  - ESP-IDF: Use `idf_component_register(...)` with TINYPAN_ENABLE_LWIP=0.
-#             The ESP-IDF framework already links its own lwIP. Using this
-#             CMake alongside it will produce duplicate symbol linker errors.
+#  - ESP-IDF: Use `idf_component_register(...)`. The ESP-IDF framework already
+#             links its own lwIP. Ensure `TINYPAN_ENABLE_LWIP=1` is set to
+#             compile the netif adapter, but do not set `TINYPAN_FETCH_LWIP_TEST_HARNESS`.
 #
-#  - Zephyr: Use `zephyr_library_named(tinypan)` in a Zephyr module with
-#            TINYPAN_ENABLE_LWIP=0. Zephyr manages lwIP through its own Kconfig
-#            and CMake infrastructure.
+#  - Zephyr: Use `zephyr_library_named(tinypan)` in a Zephyr module. 
+#            Zephyr manages lwIP through its own Kconfig and CMake infrastructure.
 #
 cmake_minimum_required(VERSION 3.12)
 if(POLICY CMP0135)
@@ -29,7 +28,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Options
 option(TINYPAN_BUILD_TESTS "Build tests" ON)
 option(TINYPAN_USE_MOCK_HAL "Use mock HAL for testing" ON)
-option(TINYPAN_ENABLE_LWIP "Enable full lwIP runtime integration" ON)
+option(TINYPAN_ENABLE_LWIP "Enable lwIP runtime integration" ON)
+option(TINYPAN_FETCH_LWIP_TEST_HARNESS "Fetch standalone lwIP for host-machine tests" ON)
 
 # Compiler warnings
 if(MSVC)
@@ -44,8 +44,8 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-# Fetch lwIP if enabled
-if(TINYPAN_ENABLE_LWIP)
+# Fetch lwIP if enabled for host verification
+if(TINYPAN_FETCH_LWIP_TEST_HARNESS)
     include(FetchContent)
     message(STATUS "Downloading lwIP stack...")
     FetchContent_Declare(
@@ -54,8 +54,13 @@ if(TINYPAN_ENABLE_LWIP)
         DOWNLOAD_EXTRACT_TIMESTAMP true
     )
     
-    # Manually populate so we can use the sources without adding lwIP's own
-    # CMake project (which checks for Doxygen and causes harmless warnings).
+    # Policy CMP0169: Suppress FetchContent_Populate deprecation warning
+    if(POLICY CMP0169)
+        cmake_policy(SET CMP0169 OLD)
+    endif()
+
+    # Manually populate so we can use the sources WITHOUT adding lwIP's own
+    # CMake project (which adds its own targets and checks for Doxygen).
     FetchContent_GetProperties(lwip)
     if(NOT lwip_POPULATED)
         FetchContent_Populate(lwip)
@@ -115,7 +120,7 @@ if(TINYPAN_USE_MOCK_HAL)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/hal/mock
     )
-    if(TINYPAN_ENABLE_LWIP)
+    if(TINYPAN_FETCH_LWIP_TEST_HARNESS)
         target_include_directories(tinypan_hal_mock PUBLIC
             ${lwip_SOURCE_DIR}/src/include
         )
@@ -124,7 +129,7 @@ if(TINYPAN_USE_MOCK_HAL)
     target_link_libraries(tinypan PUBLIC tinypan_hal_mock)
 endif()
 
-if(TINYPAN_ENABLE_LWIP)
+if(TINYPAN_FETCH_LWIP_TEST_HARNESS)
     target_include_directories(tinypan PUBLIC
         ${lwip_SOURCE_DIR}/src/include
     )
@@ -149,7 +154,7 @@ if(TINYPAN_BUILD_TESTS)
         target_link_libraries(test_bnep tinypan_hal_mock)
     endif()
 
-    if(TINYPAN_ENABLE_LWIP)
+    if(TINYPAN_FETCH_LWIP_TEST_HARNESS)
         target_include_directories(test_bnep PRIVATE
             ${lwip_SOURCE_DIR}/src/include
         )

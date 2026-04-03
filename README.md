@@ -18,7 +18,7 @@ Targeted at dual-mode Bluetooth controllers (e.g., original ESP32).
 Targeted at BLE-only or dual-mode controllers (e.g., nRF52, ESP32-C3, ESP32-S3).
 
 *   **Stack:** lwIP -> SLIP -> BLE UART Service (NUS)
-*   **Deterministic SLIP Streaming:** An efficient single-pass SLIP encoder minimizes cache misses and delivers predictable throughput on ultra-low-power BLE cores without requiring SIMD.
+*   **Deterministic SLIP Streaming:** A single-pass SLIP encoder minimizes cache misses and delivers predictable throughput on ultra-low-power BLE cores without requiring SIMD.
 *   **Compatibility:** Requires a companion application on the host to bridge BLE traffic into the OS networking stack. This is not a standard hotspot connection.
 
 ## Memory Design
@@ -28,7 +28,7 @@ The BNEP transport (`tinypan_bnep_transport.c`) implements zero-copy for IP payl
 
 The `pbuf` and its associated `tinypan_iovec_t` descriptor array are held in the static transport job queue until the HAL fires `HAL_L2CAP_EVENT_TX_COMPLETE`. This ensures that even on true DMA implementations where the hardware reads descriptors asynchronously, the memory remains valid and immutable until the radio signals completion. Only one frame is in-flight at a time. 
 
-**Dead-Link Protection (Hardening):** In the event of an abrupt L2CAP disconnect where the peer fails to acknowledge in-flight packets, the BNEP transport forcibly reclaims and frees all queued pbufs during the cleanup phase. This prevents pool exhaustion and ensures immediate memory recovery for subsequent connection attempts.
+**Dead-Link Protection (Hardening):** TinyPAN implements strict DMA safety. If an asynchronous transmission times out at the BNEP layer (e.g., hardware stall), the library forcibly tears down the L2CAP link to safely cancel hardware state before reclaiming pbufs. This prevents DMA use-after-free conditions common in multi-threaded RTOS stacks.
 
 ### SLIP Encoder
 The SLIP transport encodes outgoing `pbuf` chains into a configurable staging buffer (`TINYPAN_SLIP_CHUNK_SIZE`) using an efficient single-pass C loop. This approach is optimized for compiler throughput and ensures predictable performance across diverse MCU architectures. At runtime, the transport queries `hal_bt_l2cap_get_mtu()` and enforces a minimum safety boundary to prevent integer underflows. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is transmitted.
@@ -54,9 +54,9 @@ Integration with a specific Bluetooth stack requires implementing the `tinypan_h
 7.  **RX Integration**: The HAL must invoke the registered `hal_l2cap_recv_callback_t` from the polling context or bridge incoming data through a thread-safe queue/ring buffer.
 
 ### ESP32-C3 / ESP32-S3 (BLE-only/NimBLE)
-> [!IMPORTANT]
-> The provided `ports/esp32_classic/tinypan_hal_esp32.c` reference HAL targets the **Bluetooth Classic (BR/EDR)** L2CAP stack. 
-> To use TinyPAN in **Mode B (SLIP Bridge)** on BLE-only chips like the ESP32-C3, you must implement a wrapper for your chosen BLE stack (e.g., NimBLE or Bluedroid BLE GATT Server) that satisfies the `tinypan_hal.h` interface. 
+> The provided `ports/esp32_classic/tinypan_hal_esp32.c` reference HAL targets the **Bluetooth Classic (BR/EDR)** L2CAP stack.
+> 
+> **ESP-IDF Integration:** Ensure `TINYPAN_ENABLE_LWIP=1` is set in your build configuration. The library will detect the ESP-IDF environment and link against the system lwIP headers. Do NOT set `TINYPAN_FETCH_LWIP_TEST_HARNESS` in production builds.
 
 ### Threading and Reentrancy
 TinyPAN is non-reentrant. All library interactions -- including API calls and HAL callbacks -- must be synchronized to the same thread context as `tinypan_process()`. The provided reference ports (ESP32, Zephyr) bridge interrupt/callback-context events to the application thread using thread-safe RTOS primitives (Mutexes and MessageBuffers).

@@ -58,8 +58,10 @@ static uint32_t s_l2cap_handle = 0;
 static bool s_tx_busy = false;
 static bool s_tx_complete_pending = false;
 
-/* Used to align and pack unaligned or non-contiguous data for DMA safety */
-static uint8_t s_tx_aligned_buf[TINYPAN_L2CAP_MTU + 32];
+/* Used to align and pack unaligned or non-contiguous data for DMA safety.
+ * Declared as uint32_t to guarantee 4-byte alignment in the .bss section. */
+static uint32_t s_tx_aligned_buf_raw[(TINYPAN_L2CAP_MTU + 32 + 3) / 4];
+#define s_tx_aligned_buf ((uint8_t*)s_tx_aligned_buf_raw)
 
 /* RX Message Buffer: Safely bridges raw Bluetooth payloads from the BT ISR
  * to the main application task without touching the lwIP heap allocators.

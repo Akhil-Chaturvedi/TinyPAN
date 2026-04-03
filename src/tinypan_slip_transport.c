@@ -3,7 +3,7 @@
  *
  * Implements tinypan_transport_t for BLE SLIP companion mode.
  *
- * TX: Encodes outgoing pbuf chains into a staging buffer using an efficient
+ * TX: Encodes outgoing pbuf chains into a staging buffer using a
  * single-pass C loop. Flushed via hal_bt_l2cap_send().
  *
  * RX: Accumulates incoming bytes from the HAL into a static accumulator.
