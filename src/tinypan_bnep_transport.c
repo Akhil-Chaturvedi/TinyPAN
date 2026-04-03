@@ -71,9 +71,9 @@ static int bnep_transport_init(void) {
     if (config) {
         uint8_t local_addr[6];
         hal_get_local_bd_addr(local_addr);
-        /* Apply Locally Administered Bit (0x02) to match lwIP netif MAC.
-         * This ensures the BNEP header compression check (memcmp with src_addr) 
-         * evaluates to true, as lwIP flips this bit for its virtual interface. */
+        /* Strip multicast bit and apply Locally Administered Bit (0x02) 
+         * to match lwIP netif MAC exactly. */
+        local_addr[0] &= ~0x01;
         local_addr[0] |= 0x02;
         bnep_set_local_addr(local_addr);
         bnep_set_remote_addr(config->remote_addr);
@@ -179,12 +179,21 @@ void bnep_transport_drain_tx_queue(void) {
         job->iov[0].iov_len = job->hdr_len;
         job->iov_count = 1;
 
-        /* Determine offset to skip the Ethernet header (14 bytes + pad) */
-#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
-        uint16_t skip_bytes = 14 + ETH_PAD_SIZE;
-#else
+        /* Determine offset to skip the Ethernet header (typically 14 bytes) */
         uint16_t skip_bytes = 14;
+
+        /* VLAN 802.1Q check: If the original header was 0x8100, we must 
+         * skip 18 bytes (14 header + 4 VLAN tag). */
+        uint8_t* eth_header;
+#if defined(ETH_PAD_SIZE) && ETH_PAD_SIZE > 0
+        eth_header = (uint8_t*)q->payload + ETH_PAD_SIZE;
+        skip_bytes += ETH_PAD_SIZE;
+#else
+        eth_header = (uint8_t*)q->payload;
 #endif
+        if (eth_header[12] == 0x81 && eth_header[13] == 0x00) {
+            skip_bytes += 4;
+        }
 
         struct pbuf* iter = q;
         uint16_t max_iov = sizeof(job->iov) / sizeof(job->iov[0]);
@@ -310,12 +319,12 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
         return ERR_CONN;
     }
     
-     * BNEP iovec Architecture (Structural Zero-Copy).
+    /* BNEP iovec Architecture (Structural Zero-Copy).
      * Instead of mutating the shared pbuf using pbuf_header(), we synthesize
      * the BNEP header locally in the queue struct, and pass it directly into
      * iov[0] while the remaining pbuf segments map to iov[1..N]. This 
      * architecture supports hardware-level zero-copy on HALs that implement 
-     * scatter-gather DMA.
+     * scatter-gather DMA. */
 
     /* Read Ethernet header via safe byte indexing to avoid unaligned access faults
      * on architectures that do not support non-word-aligned pointers (e.g. ARM Cortex-M0).
@@ -328,6 +337,12 @@ static int bnep_transport_output(struct netif* netif, struct pbuf* p) {
     uint8_t* dst_addr = &eth_ptr[0];
     uint8_t* src_addr = &eth_ptr[6];
     uint16_t ethertype = (eth_ptr[12] << 8) | eth_ptr[13];
+
+    /* VLAN 802.1Q Support: If ethertype is 0x8100, the real ethertype 
+     * is at offset 16 and the payload starts at offset 18. */
+    if (ethertype == 0x8100) {
+        ethertype = (eth_ptr[16] << 8) | eth_ptr[17];
+    }
 
     uint8_t bnep_hdr_len = bnep_get_ethernet_header_len(dst_addr, src_addr);
 

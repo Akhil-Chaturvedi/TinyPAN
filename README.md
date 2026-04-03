@@ -18,7 +18,7 @@ Targeted at dual-mode Bluetooth controllers (e.g., original ESP32).
 Targeted at BLE-only or dual-mode controllers (e.g., nRF52, ESP32-C3, ESP32-S3).
 
 *   **Stack:** lwIP -> SLIP -> BLE UART Service (NUS)
-*   **Deterministic SLIP Streaming:** A single-pass SLIP encoder minimizes cache misses and delivers predictable throughput on ultra-low-power BLE cores without requiring SIMD.
+*   **Deterministic SLIP Streaming:** A single-pass SLIP encoder minimizes cache misses and delivers predictable throughput on low-power BLE cores without requiring SIMD.
 *   **Compatibility:** Requires a companion application on the host to bridge BLE traffic into the OS networking stack. This is not a standard hotspot connection.
 
 ## Memory Design
@@ -31,7 +31,7 @@ The `pbuf` and its associated `tinypan_iovec_t` descriptor array are held in the
 **Dead-Link Protection (Hardening):** TinyPAN implements strict DMA safety. If an asynchronous transmission times out at the BNEP layer (e.g., hardware stall), the library forcibly tears down the L2CAP link to safely cancel hardware state before reclaiming pbufs. This prevents DMA use-after-free conditions common in multi-threaded RTOS stacks.
 
 ### SLIP Encoder
-The SLIP transport encodes outgoing `pbuf` chains into a configurable staging buffer (`TINYPAN_SLIP_CHUNK_SIZE`) using an efficient single-pass C loop. This approach is optimized for compiler throughput and ensures predictable performance across diverse MCU architectures. At runtime, the transport queries `hal_bt_l2cap_get_mtu()` and enforces a minimum safety boundary to prevent integer underflows. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is transmitted.
+The SLIP transport encodes outgoing `pbuf` chains into a configurable staging buffer (`TINYPAN_SLIP_CHUNK_SIZE`) using a structural single-pass C loop. This approach is optimized for compiler throughput and ensures predictable performance across diverse MCU architectures. At runtime, the transport queries `hal_bt_l2cap_get_mtu()` and enforces a minimum safety boundary to prevent integer underflows. The original pbuf is held by reference (`pbuf_ref`) and released only after the final chunk is transmitted.
 
 ### SLIP Decoder
 Incoming SLIP bytes are accumulated directly into a static 1.6 KB accumulator buffer (`s_slip_rx_buf`). Once a `SLIP_END` delimiter is detected, exactly one `pbuf` is allocated from the pool and the frame is passed to lwIP. This deterministic approach eliminates pool fragmentation risks and prevents memory exhaustion during serial stream error recovery.
@@ -39,7 +39,7 @@ Incoming SLIP bytes are accumulated directly into a static 1.6 KB accumulator bu
 ### Resource Metrics (Typical 32-bit MCU)
 - **Library BSS/Data:** < 400 bytes (core logic and transport state)
 - **Flash (Text):** ~12-18 KB (mode dependent)
-- **Memory Model:** The reference HALs (ESP32, Zephyr) use a thread-safe RX path via `xMessageBuffer` or `ring_buf`. This design allows the Bluetooth task to copy incoming data without touching the lwIP heap, completely avoiding the spinlock-induced heap corruption risks inherent in standard multicore stack integrations.
+- **Memory Model:** The reference HALs (ESP32, Zephyr) use a thread-safe RX path via `xMessageBuffer` or `ring_buf`. This design allows the Bluetooth task to copy incoming data without touching the lwIP heap, avoiding the spinlock-induced heap corruption risks inherent in standard multicore stack integrations.
 
 ## Hardware Abstraction Layer (HAL)
 
@@ -67,7 +67,7 @@ TinyPAN is non-reentrant. All library interactions -- including API calls and HA
 - **Header Compression:** Dynamically enabled for PANU-to-NAP flows to minimize radio-on time and latency.
 - **BNEP Control Packets:** Extension headers are parsed with strict bounds checking before control type dispatch.
 - **Multicast Filtering:** Automatically sent after BNEP setup before DHCP.
-- **DHCP Lifecycle:** Managed by lwIP's DHCP client. TinyPAN implements a soft retry mechanism with exponential backoff for DHCP discovery timeouts. The netif stack is reset on disconnect; TinyPAN monitors the IP address state in the netif callback to handle lease expiration or renewal failures.
+- **DHCP Lifecycle:** Managed by lwIP's DHCP client. If DHCP discovery fails after maximum retries (`TINYPAN_DHCP_MAX_RETRIES`), TinyPAN forcibly tears down the L2CAP link. This ensures the mobile OS (iOS/Android) interface is reset, which is the most reliable way to recover from stalled routing daemons on the hotspot host.
 - **State Transition Safety:** Prevents invalid transitions and guarantees state machine consistency.
 - **MCU Hardening:** Parsing logic and static queue sizes are optimized for high-security, low-RAM environments.
 

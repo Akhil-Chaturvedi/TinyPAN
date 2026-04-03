@@ -666,10 +666,11 @@ static void handle_control_packet(const uint8_t* data, uint16_t len) {
             break;
             
         case BNEP_CTRL_FILTER_NET_TYPE_SET:
+        case BNEP_CTRL_FILTER_MULTI_ADDR_SET:
             /* BNEP Protocol Compliance: Acknowledge filter requests with 'Success'
                to prevent session termination by host OS stacks (e.g. iOS)
                that require a valid response to keep the link active. */
-            TINYPAN_LOG_DEBUG("Received filter set request, acknowledging Success");
+            TINYPAN_LOG_DEBUG("Received filter set request (type 0x%02X), acknowledging Success", control_type);
             {
                 uint8_t resp_type = (control_type == BNEP_CTRL_FILTER_NET_TYPE_SET) ?
                                     BNEP_CTRL_FILTER_NET_TYPE_RESPONSE :

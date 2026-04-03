@@ -58,8 +58,9 @@
 #define PBUF_POOL_SIZE              4
 #define PBUF_POOL_BUFSIZE           1536
 
-/* Reserve space at the head of every pbuf for the BNEP encapsulation header */
-#define PBUF_LINK_ENCAPSULATION_HLEN 15
+/* Reserve space at the head of every pbuf for the BNEP encapsulation header.
+ * Set to 0 because TinyPAN uses iovec scatter-gather to synthesize headers. */
+#define PBUF_LINK_ENCAPSULATION_HLEN 0
 
 /* Pad Ethernet header by 1 byte so 15-byte BNEP header replacement yields perfect 32-bit alignment */
 #define ETH_PAD_SIZE                 1

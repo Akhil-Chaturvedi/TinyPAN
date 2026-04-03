@@ -62,6 +62,7 @@ K_MSGQ_DEFINE(s_zephyr_event_q, sizeof(struct z_event_msg), 16, 4);
 RING_BUF_DECLARE(s_rx_ringbuf, 2048);
 
 /* SLIP TX Chunker */
+static struct k_spinlock s_tx_lock;
 static bool s_tx_notify_pending = false;
 static uint32_t s_tx_retry_time = 0;
 
@@ -90,13 +91,19 @@ void hal_bt_poll(void) {
     }
 
     /* 3. Drain pending CAN_SEND_NOW events */
+    k_spinlock_key_t key = k_spin_lock(&s_tx_lock);
     if (s_current_conn && s_tx_notify_pending) {
         if (k_uptime_get() >= s_tx_retry_time) {
             s_tx_notify_pending = false;
+            k_spin_unlock(&s_tx_lock, key);
             if (s_event_cb) {
                 s_event_cb(HAL_L2CAP_EVENT_CAN_SEND_NOW, 0, s_event_cb_data);
             }
+        } else {
+            k_spin_unlock(&s_tx_lock, key);
         }
+    } else {
+        k_spin_unlock(&s_tx_lock, key);
     }
 }
 
@@ -216,10 +223,12 @@ bool hal_bt_l2cap_can_send(void) {
 }
 
 void hal_bt_l2cap_request_can_send_now(void) {
+    k_spinlock_key_t key = k_spin_lock(&s_tx_lock);
     if (s_current_conn) {
         s_tx_notify_pending = true;
         s_tx_retry_time = k_uptime_get() + 5; /* 5ms backoff */
     }
+    k_spin_unlock(&s_tx_lock, key);
 }
 
 int hal_bt_l2cap_send(const uint8_t* data, uint16_t len) {

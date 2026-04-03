@@ -2,9 +2,8 @@
  * TinyPAN SLIP Transport Backend
  *
  * Implements tinypan_transport_t for BLE SLIP companion mode.
- *
  * TX: Encodes outgoing pbuf chains into a staging buffer using a
- * single-pass C loop. Flushed via hal_bt_l2cap_send().
+ * structural single-pass C loop. Flushed via hal_bt_l2cap_send().
  *
  * RX: Accumulates incoming bytes from the HAL into a static accumulator.
  * Frame completion triggers a single pbuf_alloc (PBUF_POOL) and pbuf_take.
@@ -263,6 +262,7 @@ void slip_transport_drain_tx_queue(void) {
         bool frame_done = false;
         if (s_slip_tx_state == 2 && chunk_idx < max_chunk) {
             s_slip_chunk_buf[chunk_idx++] = SLIP_END;
+            s_slip_tx_state = 0; /* Reset state immediately so we don't double-append on retry */
             frame_done = true;
         }
 
