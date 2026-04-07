@@ -266,9 +266,7 @@ static void bnep_transport_process(void) {
                  * but necessary to avoid permanent system stall. */
                 hal_bt_l2cap_disconnect();
                 
-                /* CRITICAL: Advance ring buffer head!
-                 * Previous implementation forgot this, causing a NULL dereference in
-                 * subsequent drain_tx_queue passes. */
+                /* Update ring buffer head to reflect packet reclamation. */
                 s_bnep_tx_head = (s_bnep_tx_head + 1) % TINYPAN_TX_QUEUE_LEN;
                 
                 if (q) pbuf_free(q);

@@ -78,7 +78,7 @@ typedef enum {
     TINYPAN_ERR_BNEP_FAILED = -6,   /**< BNEP error */
     TINYPAN_ERR_TIMEOUT = -7,       /**< Operation timed out */
     TINYPAN_ERR_NO_MEMORY = -8,     /**< Out of memory */
-    TINYPAN_ERR_BUSY = -9           /**< Resource busy, try again */
+    TINYPAN_ERR_BUSY = -9           /**< Resource busy. Note: HAL layer returns positive 1 for busy. */
 } tinypan_error_t;
 
 /**

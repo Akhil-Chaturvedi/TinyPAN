@@ -181,6 +181,10 @@ void slip_transport_drain_tx_queue(void) {
         /* If we have a pending chunk from a previous busy state, try sending it first */
         if (s_slip_chunk_len > 0) {
             int result = hal_bt_l2cap_send(s_slip_chunk_buf, s_slip_chunk_len);
+            if (result > 0) {
+                hal_bt_l2cap_request_can_send_now();
+                hal_mutex_unlock(s_slip_tx_mutex);
+                break;
             } else if (result < 0) {
                 /* Hard error, drop packet and log */
                 TINYPAN_LOG_ERROR("slip_tx: HAL send failed (%d), dropping packet", result);
