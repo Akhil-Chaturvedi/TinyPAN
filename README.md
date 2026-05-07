@@ -57,6 +57,8 @@ Integration with a specific Bluetooth stack requires implementing the `tinypan_h
 > The provided `ports/esp32_classic/tinypan_hal_esp32.c` reference HAL targets the **Bluetooth Classic (BR/EDR)** L2CAP stack.
 > 
 > **ESP-IDF Integration:** Ensure `TINYPAN_ENABLE_LWIP=1` is set in your build configuration. The library will detect the ESP-IDF environment and link against the system lwIP headers. Do NOT set `TINYPAN_FETCH_LWIP_TEST_HARNESS` in production builds.
+>
+> **Prerequisite: GAP Security.** TinyPAN handles L2CAP and BNEP only. Your application must configure GAP security (SSP mode, IO capabilities, bonding) and register a GAP callback before calling `tinypan_init()`. Without this, Android/iOS will reject the L2CAP connection with an authentication failure (HCI reason 0x05). Ensure `nvs_flash_init()` is called before `esp_bluedroid_init()` so bonding keys persist across reboots. See `examples/esp32_app_main.c` for a reference integration.
 
 ### Threading and Reentrancy
 TinyPAN is non-reentrant. All library interactions -- including API calls and HAL callbacks -- must be synchronized to the same thread context as `tinypan_process()`. The provided reference ports (ESP32, Zephyr) bridge interrupt/callback-context events to the application thread using thread-safe RTOS primitives (Mutexes and MessageBuffers).
@@ -87,6 +89,10 @@ The following optimizations were implemented to ensure TinyPAN functions within 
 - **DHCP Lifecycle:** Managed by lwIP's DHCP client. If DHCP discovery fails after maximum retries (`TINYPAN_DHCP_MAX_RETRIES`), TinyPAN forcibly tears down the L2CAP link. This ensures the mobile OS (iOS/Android) interface is reset, which is the most reliable way to recover from stalled routing daemons on the hotspot host.
 - **State Transition Safety:** Prevents invalid transitions and guarantees state machine consistency.
 - **MCU Design:** Parsing logic and static queue sizes are designed for high-availability, low-RAM environments.
+
+## Acknowledgments
+
+- [@dipinraj](https://github.com/dipinraj) -- Reported the GAP security documentation gap that led to the addition of `examples/esp32_app_main.c` and the ESP-IDF integration prerequisites ([#3](https://github.com/Akhil-Chaturvedi/TinyPAN/issues/3)).
 
 ## License
 
