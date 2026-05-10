@@ -1,0 +1,11 @@
+/*
+ * Stub esp_timer.h for ESP32 HAL compilation test.
+ */
+#ifndef ESP_TIMER_H
+#define ESP_TIMER_H
+
+#include <stdint.h>
+
+int64_t esp_timer_get_time(void);
+
+#endif /* ESP_TIMER_H */

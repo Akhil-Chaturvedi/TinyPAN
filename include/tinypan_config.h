@@ -181,6 +181,41 @@
 #endif
 
 /**
+ * Stack size (bytes) for the ESP32 HAL RX reader task. This task blocks on
+ * POSIX read() and pushes data into a MessageBuffer for the app task.
+ * Minimum: 2048. Production: 4096.
+ */
+#ifndef TINYPAN_ESP_RX_TASK_STACK
+#define TINYPAN_ESP_RX_TASK_STACK           4096
+#endif
+
+/**
+ * Priority for the ESP32 HAL RX reader task. Must be lower than the BTU task
+ * priority to avoid starving the Bluetooth stack.
+ */
+#ifndef TINYPAN_ESP_RX_TASK_PRIO
+#define TINYPAN_ESP_RX_TASK_PRIO            (configMAX_PRIORITIES - 3)
+#endif
+
+/**
+ * Size (bytes) of the MessageBuffer that bridges RX data from the reader task
+ * to the app task. Must be at least 2x TINYPAN_L2CAP_MTU (1691) to buffer a
+ * full frame plus framing overhead.
+ */
+#ifndef TINYPAN_ESP_RX_MSG_BUF_SIZE
+#define TINYPAN_ESP_RX_MSG_BUF_SIZE         8192
+#endif
+
+/**
+ * Delay (milliseconds) before the HAL fires HAL_L2CAP_EVENT_CAN_SEND_NOW
+ * after hal_bt_l2cap_request_can_send_now() is called. This coalesces
+ * multiple rapid requests into a single event.
+ */
+#ifndef TINYPAN_CAN_SEND_DELAY_MS
+#define TINYPAN_CAN_SEND_DELAY_MS           10
+#endif
+
+/**
  * Auto-assign a static IP Address when the SLIP link connects.
  * Since SLIP (Raw P2P) disables DHCP, this simplifies developer workflows by
  * automatically configuring the lwIP routing table upon BLE tunnel establishment.
